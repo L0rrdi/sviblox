@@ -21,4 +21,5 @@ load-snippet.js
 
 # Internal dev docs and diagnostic scripts — kept local, not published.
 *.md
+!README.md
 scripts/
