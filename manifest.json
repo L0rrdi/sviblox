@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "SviBlox Beta",
+  "version": "0.2.0",
+  "version_name": "0.2.0 beta",
+  "description": "BETA. Roblox home, friend stats, badges, store extras, subplaces, themes, currency, total spent, and playtime tracking.",
+  "permissions": ["storage", "alarms", "unlimitedStorage"],
+  "host_permissions": [
+    "https://www.roblox.com/*",
+    "https://*.roblox.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/serviceWorker.ts",
+    "type": "module"
+  },
+  "icons": {
+    "16": "public/icons/icon-16.png",
+    "48": "public/icons/icon-48.png",
+    "128": "public/icons/icon-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.roblox.com/*"],
+      "js": ["src/content/router.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_icon": {
+      "16": "public/icons/icon-16.png",
+      "48": "public/icons/icon-48.png",
+      "128": "public/icons/icon-128.png"
+    },
+    "default_popup": "src/popup/index.html",
+    "default_title": "SviBlox"
+  },
+  "options_page": "src/options/index.html"
+}

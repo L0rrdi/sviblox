@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SviBlox Beta Privacy Policy</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #172033;
+        background: #f6f8fb;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        box-sizing: border-box;
+        width: min(860px, 100%);
+        margin: 0 auto;
+        padding: 48px 20px 72px;
+      }
+
+      article {
+        background: #fff;
+        border: 1px solid #d9e0ea;
+        border-radius: 8px;
+        padding: clamp(24px, 5vw, 48px);
+        box-shadow: 0 8px 28px rgb(20 36 64 / 8%);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 5vw, 3rem);
+        line-height: 1.05;
+      }
+
+      h2 {
+        margin: 32px 0 10px;
+        font-size: 1.25rem;
+      }
+
+      p,
+      li {
+        font-size: 1rem;
+        line-height: 1.65;
+      }
+
+      p {
+        margin: 0 0 14px;
+      }
+
+      ul {
+        margin: 0;
+        padding-left: 1.35rem;
+      }
+
+      .date {
+        color: #5d6b82;
+        margin-bottom: 28px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <article>
+        <h1>SviBlox Beta Privacy Policy</h1>
+        <p class="date">Effective date: May 10, 2026</p>
+
+        <p>
+          SviBlox Beta is a browser extension that adds quality-of-life features to the
+          Roblox website, including home page sections, friend-tile stats, badge display
+          tools, custom themes, RoPro playtime import, optional local playtime tracking,
+          dev products on the Store tab, subplaces on the Servers tab, an optional
+          Robux-to-currency converter, and an optional per-experience total-spent
+          display.
+        </p>
+
+        <h2>Data SviBlox Stores</h2>
+        <p>SviBlox stores the following data in Chrome extension storage in the user's browser profile:</p>
+        <ul>
+          <li>Extension settings, such as theme selection, currency selection, and playtime tracking preference.</li>
+          <li>Roblox game IDs and metadata used to display extension features.</li>
+          <li>Imported playtime data provided manually by the user.</li>
+          <li>Optional extension-tracked playtime while the browser is open.</li>
+          <li>Cached Roblox API responses used to reduce repeated requests, including cached transaction summaries when the total-spent feature is enabled.</li>
+          <li>Custom theme colors and user-selected theme background images.</li>
+        </ul>
+
+        <h2>Data SviBlox Reads</h2>
+        <p>
+          SviBlox may read the following data from Roblox endpoints using the user's
+          existing Roblox browser session:
+        </p>
+        <ul>
+          <li>The current Roblox user ID from the authenticated user endpoint.</li>
+          <li>Public Roblox data such as game metadata, thumbnails, favorites, public creations, badge ownership, dev products, and the list of places in an experience.</li>
+          <li>Optional Roblox presence information (online / in-game / studio) when the user enables the local playtime tracking feature.</li>
+          <li>The user's own purchase history from the Roblox transactions endpoint when the user enables the optional Total Spent feature. This is used to compute, in the user's browser, how much Robux the user has spent on the currently visible experience. This data is read on demand, processed locally, and is never transmitted to the developer or any third party.</li>
+        </ul>
+        <p>
+          SviBlox uses the user's existing Roblox browser session through normal browser
+          requests. SviBlox does not ask for, store, log, export, or collect Roblox passwords,
+          session tokens, .ROBLOSECURITY, PINs, or other authentication secrets.
+        </p>
+
+        <h2>Data Sharing</h2>
+        <p>SviBlox does not sell, transfer, or share user data with third parties.</p>
+        <p>SviBlox does not send user data to the developer.</p>
+        <p>SviBlox does not use analytics, advertising trackers, or third-party telemetry services.</p>
+
+        <h2>Network Requests</h2>
+        <p>
+          SviBlox communicates only with roblox.com and Roblox-owned subdomains declared in
+          the extension's host permissions. These requests are used only for the extension's
+          visible Roblox website features.
+        </p>
+
+        <h2>User-Provided Content</h2>
+        <p>
+          If a user uploads a custom theme background image, that image is stored locally in
+          Chrome extension storage. SviBlox does not upload custom theme images to any server.
+        </p>
+
+        <h2>Data Removal</h2>
+        <p>
+          Users can remove SviBlox data by clearing the extension's storage or uninstalling
+          the extension from Chrome. Users can also reset extension-tracked playtime from the
+          SviBlox Options page. The user can disable any optional feature (including the
+          total-spent feature) from the SviBlox popup, which stops the corresponding network
+          requests immediately.
+        </p>
+
+        <h2>Changes</h2>
+        <p>
+          This policy may be updated when SviBlox changes. The latest version should be
+          published at the same privacy policy URL used in the Chrome Web Store listing.
+        </p>
+
+        <h2>Contact</h2>
+        <p>
+          For privacy questions, contact the SviBlox developer through the support contact
+          listed on the Chrome Web Store item.
+        </p>
+      </article>
+    </main>
+  </body>
+</html>

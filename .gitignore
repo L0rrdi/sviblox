@@ -1,0 +1,24 @@
+node_modules
+dist
+.DS_Store
+*.log
+.vite
+.env
+.env.local
+
+# Build artifacts — regenerable, not source.
+sviblox-beta-*-chrome-web-store.zip
+_zip_audit/
+
+# Personal data dumps (RoPro export, playtime, generated loader).
+playtime.json
+ropro-mostplayed.json
+load-snippet.js
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Internal dev docs and diagnostic scripts — kept local, not published.
+*.md
+scripts/
