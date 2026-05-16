@@ -1,5 +1,6 @@
 import { getSettings } from '@/storage/settingsStore';
 import { accumulateTrackedSeconds } from '@/storage/playtimeStore';
+import { recordLastSeen, LastSeenMap } from '@/storage/lastSeenStore';
 
 const ALARM_NAME = 'bloxplus.presenceCheck';
 const POLL_INTERVAL_MIN = 1; // chrome.alarms minimum
@@ -27,12 +28,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void (async () => {
       try {
         const url = new URL(message.url);
-        if (url.protocol !== 'https:' || !url.hostname.endsWith('.roblox.com')) {
-          sendResponse({ ok: false, error: 'Only Roblox HTTPS URLs are allowed' });
+        if (!isAllowedFetchUrl(url)) {
+          sendResponse({ ok: false, error: 'URL host not allowed' });
           return;
         }
-        console.log('[SviBlox] fetchUrl ->', url.hostname);
-        const r = await fetch(url.toString(), { credentials: 'include' });
+        const hasBody = typeof message.body === 'string';
+        const responseType = message.responseType === 'text' ? 'text' : 'json';
+        console.log('[SviBlox] fetchUrl ->', url.hostname, hasBody ? 'POST' : 'GET', responseType);
+        let r: Response | null;
+        if (hasBody) {
+          r = await postWithCsrf(url.toString(), message.body as string);
+        } else {
+          // Sheets export redirects to a temporary googleusercontent.com URL;
+          // `redirect: 'follow'` (default) handles that transparently as long
+          // as both hosts are covered by our host_permissions.
+          try {
+            const init: RequestInit =
+              url.hostname.endsWith('.roblox.com')
+                ? { credentials: 'include' }
+                : { credentials: 'omit' };
+            r = await fetch(url.toString(), init);
+          } catch {
+            r = null;
+          }
+        }
+        if (!r) {
+          sendResponse({ ok: false, error: 'Network error' });
+          return;
+        }
         const text = await r.text();
         if (!r.ok) {
           console.warn('[SviBlox] fetchUrl failed', r.status);
@@ -41,6 +64,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             status: r.status,
             error: `HTTP ${r.status}: ${text.slice(0, 200)}`,
           });
+          return;
+        }
+        if (responseType === 'text') {
+          sendResponse({ ok: true, data: text });
           return;
         }
         let data: unknown;
@@ -62,7 +89,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) void poll();
+  if (alarm.name === ALARM_NAME) {
+    void poll();
+    void pollFriendsLastSeen();
+  }
 });
 
 async function ensureAlarm(): Promise<void> {
@@ -74,7 +104,8 @@ async function ensureAlarm(): Promise<void> {
 
 let cachedUserId: number | null = null;
 let cachedUserIdAt = 0;
-let cachedCsrfToken: string | null = null;
+// Roblox issues a separate CSRF token per host, so cache per-origin.
+const csrfByHost = new Map<string, string>();
 let pollInFlight = false;
 
 async function poll(): Promise<void> {
@@ -82,7 +113,7 @@ async function poll(): Promise<void> {
   pollInFlight = true;
   try {
     const settings = await getSettings();
-    if (!settings.enablePlaytimeTracking) return;
+    if (!settings.playtimeTracker) return;
 
     const userId = await getAuthenticatedUserId();
     if (!userId) return;
@@ -134,27 +165,98 @@ async function getPresence(userId: number): Promise<PresenceRow | null> {
   return d.userPresences?.[0] ?? null;
 }
 
+/**
+ * Periodically capture a snapshot of every friend's current presence, so we
+ * can show "Last seen X ago" on a friend's profile even after they go
+ * offline. Throttled with `lastFriendsPollAt` since the host alarm fires
+ * every minute but a 5-minute cadence is plenty for "last seen" precision.
+ */
+const FRIENDS_POLL_INTERVAL_MS = 5 * 60_000;
+let lastFriendsPollAt = 0;
+let friendsPollInFlight = false;
+
+async function pollFriendsLastSeen(): Promise<void> {
+  if (friendsPollInFlight) return;
+  if (Date.now() - lastFriendsPollAt < FRIENDS_POLL_INTERVAL_MS) return;
+  friendsPollInFlight = true;
+  try {
+    const userId = await getAuthenticatedUserId();
+    if (!userId) return;
+    const friendsResp = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends`, {
+      credentials: 'include',
+    });
+    if (!friendsResp.ok) return;
+    const friendsData = (await friendsResp.json()) as { data?: Array<{ id: number }> };
+    const friendIds = (friendsData.data ?? []).map((f) => f.id);
+    if (!friendIds.length) {
+      lastFriendsPollAt = Date.now();
+      return;
+    }
+    const presenceResp = await postWithCsrf(
+      'https://presence.roblox.com/v1/presence/users',
+      JSON.stringify({ userIds: friendIds })
+    );
+    if (!presenceResp || !presenceResp.ok) return;
+    const presenceData = (await presenceResp.json()) as {
+      userPresences?: Array<{ userId: number; userPresenceType: number; lastLocation?: string }>;
+    };
+    const now = new Date().toISOString();
+    const updates: LastSeenMap = {};
+    for (const p of presenceData.userPresences ?? []) {
+      // 1 = Online (Website), 2 = InGame, 3 = InStudio. Skip 0 Offline and 4 Invisible.
+      if (p.userPresenceType >= 1 && p.userPresenceType <= 3) {
+        updates[p.userId] = { ts: now, location: p.lastLocation };
+      }
+    }
+    if (Object.keys(updates).length) {
+      await recordLastSeen(updates);
+      console.log('[SviBlox] last-seen snapshot for', Object.keys(updates).length, 'friends');
+    }
+    lastFriendsPollAt = Date.now();
+  } catch (e) {
+    console.warn('[SviBlox] pollFriendsLastSeen failed:', e);
+  } finally {
+    friendsPollInFlight = false;
+  }
+}
+
+function isAllowedFetchUrl(url: URL): boolean {
+  if (url.protocol !== 'https:') return false;
+  if (url.hostname.endsWith('.roblox.com')) return true;
+  if (url.hostname === 'docs.google.com' && url.pathname.startsWith('/spreadsheets/')) return true;
+  if (url.hostname.endsWith('.googleusercontent.com')) return true;
+  return false;
+}
+
 async function postWithCsrf(url: string, body: string): Promise<Response | null> {
+  const host = (() => {
+    try { return new URL(url).hostname; } catch { return ''; }
+  })();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (cachedCsrfToken) headers['x-csrf-token'] = cachedCsrfToken;
+  const cached = host ? csrfByHost.get(host) : undefined;
+  if (cached) headers['x-csrf-token'] = cached;
 
   let r: Response;
   try {
     r = await fetch(url, { method: 'POST', credentials: 'include', headers, body });
-  } catch {
+  } catch (e) {
+    console.warn('[SviBlox] postWithCsrf network error', host, e);
     return null;
   }
 
   if (r.status === 403) {
     const token = r.headers.get('x-csrf-token');
     if (token) {
-      cachedCsrfToken = token;
+      if (host) csrfByHost.set(host, token);
       headers['x-csrf-token'] = token;
       try {
         r = await fetch(url, { method: 'POST', credentials: 'include', headers, body });
-      } catch {
+      } catch (e) {
+        console.warn('[SviBlox] postWithCsrf retry network error', host, e);
         return null;
       }
+    } else {
+      console.warn('[SviBlox] postWithCsrf 403 with no token', host);
     }
   }
   return r;

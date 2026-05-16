@@ -111,21 +111,18 @@ function ensureStyle(): void {
     .${CASH_CLASS} {
       display: inline-block;
       margin-left: 6px;
-      padding: 0 6px;
-      border-radius: 4px;
-      background: rgba(31,155,230,0.18);
+      padding: 0;
       color: inherit;
       font-size: 0.85em;
       font-weight: 600;
       line-height: 1.5;
       vertical-align: baseline;
       white-space: nowrap;
-      opacity: 0.92;
+      opacity: 0.85;
     }
     .${CASH_CLASS}-block {
       display: block;
       margin: 2px 0 0 0;
-      padding: 0 4px;
       width: max-content;
       max-width: 100%;
       font-size: 0.78em;

@@ -9,7 +9,7 @@ const SECTION_ID = 'bloxplus-badges-section';
 const HIDDEN_ATTR = 'data-bp-badge-hidden';
 
 type BadgeFilter = 'all' | 'owned' | 'unowned';
-type BadgeSort = 'default' | 'rarest' | 'common' | 'most-won' | 'won-yesterday';
+type BadgeSort = 'default' | 'rarest' | 'most-won' | 'won-yesterday' | 'recently-earned';
 
 let renderedFor: number | null = null;
 let inFlight = false;
@@ -248,7 +248,7 @@ function ensureStyle(): void {
       grid-template-columns: 100px 1fr auto;
       gap: 16px;
       padding: 12px;
-      background: rgba(255,255,255,0.03);
+      background-color: var(--bp-nav, #1a1d24);
       border: 1px solid rgba(255,255,255,0.06);
       border-radius: 8px;
       align-items: center;
@@ -323,9 +323,9 @@ function renderSection(section: HTMLElement): void {
         <select class="bp-sort">
           <option value="default">Default</option>
           <option value="rarest">Rarest first</option>
-          <option value="common">Most common first</option>
           <option value="most-won">Most won (all time)</option>
           <option value="won-yesterday">Most won yesterday</option>
+          <option value="recently-earned">Most recently earned</option>
         </select>
       </label>
       <span class="bp-badges-shown">${list.length} shown</span>
@@ -360,16 +360,15 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
   if (s.filter === 'owned') arr = arr.filter(isOwned);
   else if (s.filter === 'unowned') arr = arr.filter((b) => !isOwned(b));
 
-  const winRate = (b: BadgeDetail) => b.statistics?.winRatePercentage ?? -1;
   const wonEver = (b: BadgeDetail) => b.statistics?.awardedCount ?? -1;
   const wonY = (b: BadgeDetail) => b.statistics?.pastDayAwardedCount ?? -1;
 
   switch (s.sort) {
     case 'rarest':
-      arr.sort((a, b) => winRate(a) - winRate(b)); // smallest %  = rarest
-      break;
-    case 'common':
-      arr.sort((a, b) => winRate(b) - winRate(a));
+      // Smaller total awarded = rarer. Tie-break by awarded yesterday (also
+      // ascending), so two badges with the same lifetime total are ordered by
+      // recent activity.
+      arr.sort((a, b) => wonEver(a) - wonEver(b) || wonY(a) - wonY(b));
       break;
     case 'most-won':
       arr.sort((a, b) => wonEver(b) - wonEver(a));
@@ -377,6 +376,25 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
     case 'won-yesterday':
       arr.sort((a, b) => wonY(b) - wonY(a));
       break;
+    case 'recently-earned': {
+      // Owned badges first, newest awardedDate at the top. Unowned go to
+      // the bottom in API order.
+      const earnedAt = (b: BadgeDetail) => {
+        const d = s.ownership.get(b.id);
+        return d ? Date.parse(d) : NaN;
+      };
+      arr.sort((a, b) => {
+        const da = earnedAt(a);
+        const db = earnedAt(b);
+        const aOwned = Number.isFinite(da);
+        const bOwned = Number.isFinite(db);
+        if (aOwned && bOwned) return db - da;
+        if (aOwned) return -1;
+        if (bOwned) return 1;
+        return 0;
+      });
+      break;
+    }
     case 'default':
     default:
       // keep API-returned order

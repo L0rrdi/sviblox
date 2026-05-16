@@ -26,44 +26,50 @@ interface FeatureRow {
 
 const FEATURES: FeatureRow[] = [
   {
-    key: 'showMostPlayedWidget',
-    label: 'Most played experiences on homepage',
-    summary: 'Shows your local playtime ranking widget near the Home header.',
-  },
-  {
-    key: 'showHomeFavorites',
-    label: 'Favorites carousel on homepage',
-    summary: 'Adds the SviBlox Favorites carousel with likes, active players, arrows, and See all.',
-  },
-  {
-    key: 'showHomeMyGames',
-    label: 'My Games carousel on homepage',
-    summary: 'Adds your public creations as a Roblox-style carousel on Home.',
-  },
-  {
-    key: 'collapseDiscoverSections',
-    label: 'Standout and recommended dropdown',
-    summary: 'Groups Roblox discovery sections under one collapsible control.',
-  },
-  {
-    key: 'showFriendTileStats',
-    label: 'Restore stats on friend tiles',
+    key: 'homepageCleanup',
+    label: 'Homepage cleanup',
     summary:
-      'When a friend is in an experience on a Roblox carousel tile, also show the like % and player count beside the friend avatar.',
+      "Restyles your Roblox home page: Favorites, My Games, and Folders sections appear after Continue, and Standout / Recommended are grouped under a single collapsible dropdown.",
+    controls: [
+      {
+        type: 'select',
+        key: 'foldersFolderSelection',
+        label: 'Active folder on reload',
+        options: [
+          { value: 'previous', label: 'Previously selected folder' },
+          { value: 'random', label: 'Random folder each refresh' },
+        ],
+      },
+      {
+        type: 'select',
+        key: 'foldersGamesSort',
+        label: 'Folder games order',
+        options: [
+          { value: 'most-active', label: 'Most active players first' },
+          { value: 'least-active', label: 'Least active players first' },
+        ],
+      },
+    ],
+  },
+  {
+    key: 'playtimeTracker',
+    label: 'Playtime Tracker',
+    summary:
+      "Tracks how long you spend in each experience (60-second presence polling while the browser is open) and shows the Your Most Played widget on the home page. One switch for tracking and the widget.",
   },
   {
     key: 'showGameBadges',
-    label: 'Experience badge replacement',
-    summary: 'Replaces game badge lists with ownership, rarity, and sorting controls.',
+    label: 'Better Badges',
+    summary: 'Replaces game badge lists with ownership, rarity, won-yesterday/ever, and sort/filter controls.',
   },
   {
     key: 'showGameStoreDevProducts',
-    label: 'Dev products on Store tab',
+    label: 'Show Dev products',
     summary: 'Shows public developer products below Passes on game Store tabs.',
   },
   {
     key: 'showGameSubplaces',
-    label: 'Subplaces on Servers tab',
+    label: 'Show Subplaces',
     summary:
       'Adds a collapsible Subplaces section above Your private servers, listing other places in the experience with thumbnails and a Play button.',
   },
@@ -72,6 +78,12 @@ const FEATURES: FeatureRow[] = [
     label: 'Total spent on this experience',
     summary:
       'Reads your purchase history (gamepasses, dev products, private servers) and totals the Robux you have spent on the current experience. First load on a session pulls your transaction history, then caches.',
+  },
+  {
+    key: 'showAccountValue',
+    label: 'Profile account value',
+    summary:
+      'Adds an estimated value card to profiles. Public profiles show collectible RAP; your own profile can also total known Robux purchases from transaction history.',
   },
   {
     key: 'showRobuxCash',
@@ -102,9 +114,16 @@ const FEATURES: FeatureRow[] = [
     ],
   },
   {
-    key: 'enablePlaytimeTracking',
-    label: 'Experience playtime tracking',
-    summary: 'Tracks in-game presence every minute while the browser is open.',
+    key: 'showThemes',
+    label: 'Themes page',
+    summary:
+      'Adds a "Themes" link to the left navigation that opens the SviBlox themes overlay on /home. Switch built-in presets, mix a custom palette, or upload a background image.',
+  },
+  {
+    key: 'showUhbl',
+    label: 'Ultra Hard Badge List (UHBL)',
+    summary:
+      'Adds a "UHBL" link to the left navigation. Mirrors the community-maintained Ultra Hard Badge List sheet, grouped by difficulty (★ tiers) with per-tier owned counts when signed in.',
   },
 ];
 

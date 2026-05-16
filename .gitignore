@@ -5,21 +5,32 @@ dist
 .vite
 .env
 .env.local
+test-results/
+playwright-report/
+.playwright-mcp/
 
 # Build artifacts — regenerable, not source.
 sviblox-beta-*-chrome-web-store.zip
 _zip_audit/
+
+# Test screenshots and other ad-hoc PNGs at repo root. The four icons
+# under public/icons/ are still tracked because they live in a subdirectory.
+/*.png
 
 # Personal data dumps (RoPro export, playtime, generated loader).
 playtime.json
 ropro-mostplayed.json
 load-snippet.js
 
-# IDE / editor
+# IDE / editor + per-machine tool configs.
 .vscode/
 .idea/
+.claude/
+.mcp.json
+playwright.mcp.config.json
 
 # Internal dev docs and diagnostic scripts — kept local, not published.
 *.md
 !README.md
+!ATTRIBUTION.md
 scripts/

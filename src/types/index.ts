@@ -24,64 +24,90 @@ export interface GamePlaytimeEntry {
 
 export interface CustomTheme {
   background?: string;       // hex / rgb / rgba
-  card?: string;
+  /** Roblox's top header bar + left navigation strip. */
+  nav?: string;
   text?: string;
   accent?: string;
-  border?: string;
-  /** Data URL of an uploaded background image (capped ~2 MB). */
+  /** Data URL of an uploaded background image (capped ~16 MB). */
   backgroundImage?: string;
   /** How the bg image is laid out. */
   backgroundMode?: 'cover' | 'contain' | 'tile';
+  /** 0–200; 100 = unmodified. Applied as a CSS `filter: brightness(N%)` on
+   *  the background overlay only — does not affect the rest of the page. */
+  backgroundBrightness?: number;
 }
 
 export interface Settings {
-  highlightOwnedBadges: boolean;
-  sortBadgesEnabled: boolean;
-  showJoinedDate: boolean;
-  showAvatarItems: boolean;
-  showOwnedCatalogItems: boolean;
-  showAccountValue: boolean;
-  showMutualFriends: boolean;
-  showMostPlayedWidget: boolean;
-  showHomeFavorites: boolean;
-  showHomeMyGames: boolean;
-  showFriendTileStats: boolean;
-  collapseDiscoverSections: boolean;
+  /**
+   * Bundles all home-page layout features: Favorites + My Games + Folders
+   * sections, plus the Standout/Recommended dropdown collapse.
+   */
+  homepageCleanup: boolean;
+  /** Which folder is active on home page load. */
+  foldersFolderSelection: 'previous' | 'random';
+  /** How games are ordered inside the active folder. */
+  foldersGamesSort: 'most-active' | 'least-active';
+  /**
+   * Service-worker presence polling AND the "Your Most Played" home widget.
+   * One toggle for the whole playtime feature.
+   */
+  playtimeTracker: boolean;
   showGameBadges: boolean;
   showGameStoreDevProducts: boolean;
   showGameSubplaces: boolean;
   showTotalSpent: boolean;
+  showAccountValue: boolean;
   showRobuxCash: boolean;
   robuxCashCurrency: 'USD' | 'GBP' | 'NOK';
   robuxCashRate: 'devex' | 'regular' | 'robloxPlus';
-  enablePlaytimeTracking: boolean;
+  /** Adds the "Themes" entry to the left nav and lets the themes overlay mount. */
+  showThemes: boolean;
+  /** Adds the "UHBL" entry to the left nav and lets the UHBL overlay mount. */
+  showUhbl: boolean;
   themeId: string;
-  dateFormat: string;
   homeWidgetWindow: string;
 }
 
+export type UhblTier = 'SS' | 'S' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'N/A';
+
+export interface UhblBadge {
+  /** Position in the sheet (1-based) to preserve curator ordering. */
+  order: number;
+  badgeId: number;
+  badgeName: string;
+  gameName: string;
+  obtainment: string;
+  media: string;
+  tags: string[];
+  /**
+   * Enjoyment Rating from col I (SS..F, N/A). NOT a difficulty rating —
+   * the sheet uses STARDIV row markers in col J to delimit difficulty tiers.
+   */
+  tier: UhblTier;
+  /**
+   * Difficulty tier (1 = easiest, increasing toward the bottom of the sheet).
+   * Derived from STARDIV separator rows; rendered as N stars in the UI.
+   */
+  difficulty: number;
+  /** Roblox badge page URL straight from the sheet. */
+  badgeUrl: string;
+}
+
 export const DEFAULT_SETTINGS: Settings = {
-  highlightOwnedBadges: true,
-  sortBadgesEnabled: true,
-  showJoinedDate: true,
-  showAvatarItems: true,
-  showOwnedCatalogItems: true,
-  showAccountValue: true,
-  showMutualFriends: true,
-  showMostPlayedWidget: true,
-  showHomeFavorites: true,
-  showHomeMyGames: true,
-  showFriendTileStats: true,
-  collapseDiscoverSections: true,
+  homepageCleanup: true,
+  foldersFolderSelection: 'previous',
+  foldersGamesSort: 'most-active',
+  playtimeTracker: false,
   showGameBadges: true,
   showGameStoreDevProducts: true,
   showGameSubplaces: true,
   showTotalSpent: false,
+  showAccountValue: false,
   showRobuxCash: false,
   robuxCashCurrency: 'USD',
   robuxCashRate: 'regular',
-  enablePlaytimeTracking: false,
+  showThemes: true,
+  showUhbl: true,
   themeId: 'default',
-  dateFormat: 'long',
   homeWidgetWindow: 'all',
 };

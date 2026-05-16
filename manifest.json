@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "SviBlox Beta",
-  "version": "0.2.0",
-  "version_name": "0.2.0 beta",
+  "version": "0.3.0",
+  "version_name": "0.3.0 beta",
   "description": "BETA. Roblox home, friend stats, badges, store extras, subplaces, themes, currency, total spent, and playtime tracking.",
   "permissions": ["storage", "alarms", "unlimitedStorage"],
   "host_permissions": [
     "https://www.roblox.com/*",
-    "https://*.roblox.com/*"
+    "https://*.roblox.com/*",
+    "https://docs.google.com/spreadsheets/*",
+    "https://*.googleusercontent.com/*"
   ],
   "background": {
     "service_worker": "src/background/serviceWorker.ts",
@@ -23,6 +25,12 @@
       "matches": ["https://www.roblox.com/*"],
       "js": ["src/content/router.ts"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.roblox.com/*"],
+      "js": ["src/content/fiberBridgeMain.ts"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     }
   ],
   "action": {
@@ -34,5 +42,11 @@
     "default_popup": "src/popup/index.html",
     "default_title": "SviBlox"
   },
-  "options_page": "src/options/index.html"
+  "options_page": "src/options/index.html",
+  "web_accessible_resources": [
+    {
+      "resources": ["public/icons/classicroblox.png"],
+      "matches": ["https://*.roblox.com/*"]
+    }
+  ]
 }

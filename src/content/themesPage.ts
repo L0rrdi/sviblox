@@ -13,7 +13,7 @@ import {
   removeCustomThemeBackground,
   clearCustomTheme,
 } from '@/storage/themeStore';
-import { getPresets } from './themeInjector';
+import { getPresets, setPreviewTheme, setBackgroundBrightnessPreview } from './themeInjector';
 import { CustomTheme } from '@/types';
 
 const PAGE_ID = 'bloxplus-themes-page';
@@ -135,8 +135,36 @@ function ensureStyle(): void {
       border: 1px solid rgba(255,255,255,0.18);
       border-radius: 4px; cursor: pointer;
     }
+    #${PAGE_ID} .bp-brightness-label {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 13px;
+    }
+    #${PAGE_ID} .bp-brightness-label input[type="range"] {
+      flex: 1; max-width: 320px; accent-color: #4a90e2;
+    }
+    #${PAGE_ID} .bp-brightness-label input[type="range"]:disabled {
+      opacity: 0.4;
+    }
+    #${PAGE_ID} [data-bg-brightness-readout] {
+      font-variant-numeric: tabular-nums; min-width: 44px; text-align: right;
+      opacity: 0.8;
+    }
     #${PAGE_ID} .bp-status {
       font-size: 12px; opacity: 0.7; margin-top: 8px; min-height: 14px;
+    }
+    /* Sticky Apply/Cancel bar that appears under the palette while editing. */
+    #${PAGE_ID} .bp-palette-actions {
+      display: flex; gap: 10px; align-items: center;
+      margin-top: 16px; padding-top: 14px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.15s ease;
+    }
+    #${PAGE_ID} .bp-palette-actions.bp-dirty {
+      opacity: 1; pointer-events: auto;
+    }
+    #${PAGE_ID} .bp-palette-actions .bp-dirty-label {
+      font-size: 12px; opacity: 0.75; margin-left: auto;
     }
   `;
   document.head.appendChild(style);
@@ -149,10 +177,15 @@ function findHomeContentHost(): HTMLElement | null {
   return main instanceof HTMLElement ? main : null;
 }
 
+const SIBLING_OVERLAY_IDS = ['bloxplus-uhbl-page'];
+const OVERLAY_HASHES = ['bloxplus-themes', 'bloxplus-uhbl'];
+
 function hideHomeContent(host: HTMLElement): void {
   for (const child of host.children) {
     if (!(child instanceof HTMLElement)) continue;
     if (child.id === PAGE_ID) continue;
+    // Don't hide another SviBlox overlay if it's still in the DOM mid-handoff.
+    if (SIBLING_OVERLAY_IDS.includes(child.id)) continue;
     if (!child.hasAttribute(HIDE_ATTR)) {
       child.style.display = 'none';
       child.setAttribute(HIDE_ATTR, '1');
@@ -161,11 +194,15 @@ function hideHomeContent(host: HTMLElement): void {
 }
 
 function restoreHomeContent(): void {
+  // If we're handing off to another SviBlox overlay, leave the home content
+  // hidden — that overlay needs the same display:none state. Just drop our
+  // tag so we don't try to clear again later.
+  const handoff = OVERLAY_HASHES.includes(location.hash.replace(/^#/, '')) &&
+    !isThemesRoute();
   for (const el of document.querySelectorAll(`[${HIDE_ATTR}]`)) {
-    if (el instanceof HTMLElement) {
-      el.style.display = '';
-      el.removeAttribute(HIDE_ATTR);
-    }
+    if (!(el instanceof HTMLElement)) continue;
+    if (!handoff) el.style.display = '';
+    el.removeAttribute(HIDE_ATTR);
   }
 }
 
@@ -195,10 +232,16 @@ async function render(page: HTMLElement): Promise<void> {
     if (el) el.textContent = msg;
   };
 
-  const colorRow = (key: keyof CustomTheme, label: string, fallback: string): string => {
+  const colorRow = (
+    key: keyof CustomTheme,
+    label: string,
+    fallback: string,
+    mirror?: keyof CustomTheme
+  ): string => {
     const v = (custom[key] as string | undefined) ?? '';
+    const mirrorAttr = mirror ? ` data-mirror-to="${mirror}"` : '';
     return `
-      <div class="bp-color-row" data-key="${key}">
+      <div class="bp-color-row" data-key="${key}"${mirrorAttr}>
         <label>${label}</label>
         <input type="color" value="${normalizeColor(v) || fallback}" data-color-input />
         <input type="text" value="${v}" placeholder="${fallback}" data-color-text />
@@ -217,7 +260,7 @@ async function render(page: HTMLElement): Promise<void> {
           .map(
             (p) => `
           <div class="bp-preset ${p.id === activeId ? 'bp-active' : ''}" data-preset="${p.id}"
-               style="--s-bg:${p.vars?.background ?? '#15171c'}; --s-card:${p.vars?.card ?? '#2a2d35'};">
+               style="--s-bg:${p.vars?.background ?? '#15171c'}; --s-card:${p.vars?.nav ?? '#2a2d35'};">
             <div class="bp-preset-swatch"></div>
             <div class="bp-preset-name">${p.name}</div>
             <div class="bp-preset-id">${p.id}</div>
@@ -226,7 +269,7 @@ async function render(page: HTMLElement): Promise<void> {
           )
           .join('')}
         <div class="bp-preset ${activeId === 'custom' ? 'bp-active' : ''}" data-preset="custom"
-             style="--s-bg:${custom.background ?? '#222'}; --s-card:${custom.card ?? '#444'};">
+             style="--s-bg:${custom.background ?? '#222'}; --s-card:${custom.nav ?? '#444'};">
           <div class="bp-preset-swatch"></div>
           <div class="bp-preset-name">Custom</div>
           <div class="bp-preset-id">your palette below</div>
@@ -236,15 +279,18 @@ async function render(page: HTMLElement): Promise<void> {
 
     <div class="bp-tp-section">
       <h2>Custom palette</h2>
+      <p class="bp-tp-sub" style="margin: 0 0 14px 0;">Changes preview live. Press Apply to save, Cancel to discard.</p>
       <div class="bp-color-grid">
-        ${colorRow('background', 'Background', '#0e0f12')}
-        ${colorRow('card', 'Card / panel', '#15171c')}
-        ${colorRow('text', 'Text', '#e6e6e6')}
-        ${colorRow('accent', 'Accent (links, buttons)', '#4a90e2')}
-        ${colorRow('border', 'Border', '#202229')}
+        ${colorRow('background', 'Page background', '#0e0f12')}
+        ${colorRow('nav', 'Navigation', '#0a0b0e')}
+        ${colorRow('text', 'Text', '#ffffff', 'accent')}
+      </div>
+      <div class="bp-palette-actions" data-palette-actions>
+        <button class="bp-btn bp-btn-primary" data-action="palette-apply">Apply</button>
+        <button class="bp-btn" data-action="palette-cancel">Cancel</button>
+        <span class="bp-dirty-label" data-palette-dirty>Unsaved changes</span>
       </div>
       <div class="bp-actions">
-        <button class="bp-btn bp-btn-primary" data-action="apply-custom">Use my palette</button>
         <button class="bp-btn" data-action="reset-palette">Reset palette</button>
       </div>
     </div>
@@ -252,11 +298,7 @@ async function render(page: HTMLElement): Promise<void> {
     <div class="bp-tp-section">
       <h2>Background image</h2>
       <div class="bp-bg-controls">
-        <div class="bp-bg-preview" style="${
-          custom.backgroundImage
-            ? `background-image: url(${JSON.stringify(custom.backgroundImage)});`
-            : ''
-        }">
+        <div class="bp-bg-preview">
           ${custom.backgroundImage ? '' : 'No background image set'}
         </div>
         <div class="bp-bg-row">
@@ -272,10 +314,26 @@ async function render(page: HTMLElement): Promise<void> {
           </div>
           <button class="bp-btn bp-btn-danger" data-action="remove-bg" ${custom.backgroundImage ? '' : 'disabled'}>Remove image</button>
         </div>
+        <div class="bp-bg-row">
+          <label class="bp-brightness-label">Brightness
+            <input type="range" min="0" max="200" step="1"
+                   value="${clampBrightnessForUI(custom.backgroundBrightness)}"
+                   data-bg-brightness ${custom.backgroundImage ? '' : 'disabled'} />
+            <span data-bg-brightness-readout>${clampBrightnessForUI(custom.backgroundBrightness)}%</span>
+          </label>
+        </div>
         <div class="bp-status"></div>
       </div>
     </div>
   `;
+
+  // Data-URL backgrounds can't be inlined into a style attribute via innerHTML —
+  // the `"` chars in JSON.stringify(url) collide with the outer attribute quotes
+  // and the HTML parser shreds the URL into bogus attributes. Set it directly.
+  if (custom.backgroundImage) {
+    const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
+    if (preview) preview.style.backgroundImage = `url(${JSON.stringify(custom.backgroundImage)})`;
+  }
 
   // --- Wiring ---
 
@@ -289,30 +347,73 @@ async function render(page: HTMLElement): Promise<void> {
     });
   }
 
+  // Draft palette holds in-flight edits without touching storage. The keys we
+  // edit through this UI; backgroundImage / backgroundMode are managed below.
+  const draft: CustomTheme = {
+    background: custom.background,
+    nav: custom.nav,
+    text: custom.text,
+    accent: custom.accent,
+  };
+  const initialSnapshot = JSON.stringify(draft);
+  const actionsEl = page.querySelector<HTMLElement>('[data-palette-actions]');
+
+  const markDirty = () => {
+    const dirty = JSON.stringify(draft) !== initialSnapshot;
+    actionsEl?.classList.toggle('bp-dirty', dirty);
+    if (dirty) {
+      // Compose draft with current backgroundImage so preview keeps the image.
+      setPreviewTheme({ ...custom, ...draft });
+    } else {
+      setPreviewTheme(null);
+    }
+  };
+
   // Color inputs (both <input type=color> and <input type=text> linked).
   for (const row of page.querySelectorAll<HTMLElement>('.bp-color-row')) {
     const key = row.dataset.key as keyof CustomTheme;
+    // data-mirror-to lets a single row drive two palette vars at once — used
+    // for the merged "Text" control which writes both text and accent.
+    const mirror = row.dataset.mirrorTo as keyof CustomTheme | undefined;
     const colorEl = row.querySelector<HTMLInputElement>('[data-color-input]')!;
     const textEl = row.querySelector<HTMLInputElement>('[data-color-text]')!;
+
+    const updateDraft = (value: string) => {
+      const v = value || undefined;
+      (draft as Record<string, string | undefined>)[key as string] = v;
+      if (mirror) (draft as Record<string, string | undefined>)[mirror as string] = v;
+      markDirty();
+    };
+
     colorEl.addEventListener('input', () => {
       textEl.value = colorEl.value;
+      updateDraft(colorEl.value);
     });
     textEl.addEventListener('input', () => {
       const norm = normalizeColor(textEl.value);
       if (norm) colorEl.value = norm;
+      updateDraft(textEl.value);
     });
-    const commit = () => void setCustomTheme({ [key]: textEl.value || colorEl.value } as Partial<CustomTheme>);
-    colorEl.addEventListener('change', commit);
-    textEl.addEventListener('change', commit);
   }
 
-  // Action buttons.
-  page.querySelector('[data-action="apply-custom"]')?.addEventListener('click', async () => {
-    await setSettings({ themeId: 'custom' });
-    setStatus('Switched to your custom palette.');
+  // Apply / Cancel for the palette draft.
+  page.querySelector('[data-action="palette-apply"]')?.addEventListener('click', async () => {
+    await setCustomTheme(draft);
+    if ((await getSettings()).themeId !== 'custom') {
+      await setSettings({ themeId: 'custom' });
+    }
+    setPreviewTheme(null); // Storage listener now drives the canonical style.
+    setStatus('Palette applied.');
     await render(page);
   });
+  page.querySelector('[data-action="palette-cancel"]')?.addEventListener('click', async () => {
+    setPreviewTheme(null);
+    setStatus('Changes discarded.');
+    await render(page);
+  });
+
   page.querySelector('[data-action="reset-palette"]')?.addEventListener('click', async () => {
+    setPreviewTheme(null);
     await clearCustomTheme();
     setStatus('Custom palette cleared.');
     await render(page);
@@ -340,6 +441,22 @@ async function render(page: HTMLElement): Promise<void> {
     await render(page);
   });
 
+  // Brightness slider — apply the filter directly to the overlay div while
+  // dragging (cheap, no storage round-trip, no CSS rebuild). Commit to
+  // chrome.storage only on `change` (mouse release / arrow keys), which is
+  // what makes the value survive a reload.
+  const brightnessEl = page.querySelector<HTMLInputElement>('[data-bg-brightness]');
+  const brightnessReadout = page.querySelector<HTMLElement>('[data-bg-brightness-readout]');
+  brightnessEl?.addEventListener('input', () => {
+    const v = clampBrightnessForUI(Number(brightnessEl.value));
+    if (brightnessReadout) brightnessReadout.textContent = `${v}%`;
+    setBackgroundBrightnessPreview(v);
+  });
+  brightnessEl?.addEventListener('change', () => {
+    const v = clampBrightnessForUI(Number(brightnessEl.value));
+    void setCustomTheme({ backgroundBrightness: v });
+  });
+
   // Layout mode.
   page
     .querySelector<HTMLSelectElement>('[data-bg-mode]')
@@ -365,6 +482,11 @@ function formatBytes(bytes: number): string {
   return `${Math.ceil(bytes / 1024)} KB`;
 }
 
+function clampBrightnessForUI(v: number | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 100;
+  return Math.max(0, Math.min(200, Math.round(v)));
+}
+
 function normalizeColor(v: string): string {
   // Returns a hex (#RRGGBB) the <input type="color"> can accept, or '' if not parseable.
   const t = v.trim();
@@ -379,12 +501,18 @@ export function run(): void {
   ensureStyle();
   const host = findHomeContentHost();
   if (!host) return;
-  if (!isThemesRoute()) {
-    // Tear down if previously mounted.
+  void runAsync(host);
+}
+
+async function runAsync(host: HTMLElement): Promise<void> {
+  const settings = await getSettings();
+  const allowed = settings.showThemes && isThemesRoute();
+  if (!allowed) {
     const page = document.getElementById(PAGE_ID);
     if (page) {
       page.remove();
       restoreHomeContent();
+      setPreviewTheme(null);
     }
     return;
   }

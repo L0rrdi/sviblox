@@ -33,6 +33,14 @@ export async function getUserGamePurchases(
   userId: number,
   maxPages = 30
 ): Promise<PurchaseTransaction[]> {
+  const transactions = await getUserPurchaseTransactions(userId, maxPages);
+  return transactions.filter((tx) => tx.details?.place?.universeId);
+}
+
+export async function getUserPurchaseTransactions(
+  userId: number,
+  maxPages = 50
+): Promise<PurchaseTransaction[]> {
   const out: PurchaseTransaction[] = [];
   let cursor = '';
   for (let page = 0; page < maxPages; page += 1) {
@@ -44,13 +52,27 @@ export async function getUserGamePurchases(
       cacheKey: `tx:${userId}:${cursor}`,
       cacheTtlMs: 10 * 60_000,
     });
-    for (const tx of data.data ?? []) {
-      if (tx.details?.place?.universeId) out.push(tx);
-    }
+    for (const tx of data.data ?? []) out.push(tx);
     if (!data.nextPageCursor) break;
     cursor = data.nextPageCursor;
   }
   return out;
+}
+
+export function sumRobuxPurchases(
+  transactions: PurchaseTransaction[]
+): { totalRobux: number; count: number } {
+  let totalRobux = 0;
+  let count = 0;
+  for (const tx of transactions) {
+    if (tx.isPending) continue;
+    if (tx.currency?.type !== 'Robux') continue;
+    const amt = tx.currency.amount;
+    if (typeof amt !== 'number' || amt >= 0) continue;
+    totalRobux += Math.abs(amt);
+    count += 1;
+  }
+  return { totalRobux, count };
 }
 
 export function sumPurchasesForUniverse(

@@ -1,5 +1,34 @@
 import { robloxFetch } from './robloxClient';
 
+export interface BadgeStatistics {
+  pastDayAwardedCount: number;
+  awardedCount: number;
+  winRatePercentage: number;
+}
+
+export interface BadgeFullDetail {
+  id: number;
+  name: string;
+  description?: string;
+  enabled?: boolean;
+  iconImageId?: number;
+  created?: string;
+  updated?: string;
+  statistics?: BadgeStatistics;
+  awardingUniverse?: { id: number; name: string; rootPlaceId: number };
+}
+
+export async function getBadgeDetail(badgeId: number): Promise<BadgeFullDetail | null> {
+  try {
+    return await robloxFetch<BadgeFullDetail>(
+      `https://badges.roblox.com/v1/badges/${badgeId}`,
+      { cacheKey: `badgeDetail:${badgeId}`, cacheTtlMs: 5 * 60_000, retries: 1 }
+    );
+  } catch {
+    return null;
+  }
+}
+
 export interface BadgeDetail {
   id: number;
   name: string;

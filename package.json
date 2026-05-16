@@ -8,6 +8,8 @@
     "dev": "vite build --watch --mode development",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test:ui": "playwright test",
+    "test:ui:headed": "playwright test --headed",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"src/**/*.{ts,tsx}\""
   },
@@ -17,6 +19,8 @@
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.0.0-beta.26",
+    "@playwright/mcp": "^0.0.75",
+    "@playwright/test": "^1.60.0",
     "@types/chrome": "^0.0.270",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
