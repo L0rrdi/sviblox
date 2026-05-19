@@ -86,6 +86,59 @@ export async function getGameBadgesPage(universeId: number, limit = 100): Promis
   return data.data ?? [];
 }
 
+interface UserBadgesPage {
+  previousPageCursor: string | null;
+  nextPageCursor: string | null;
+  data: BadgeDetail[];
+}
+
+export interface UserBadgesPageResult {
+  badges: BadgeDetail[];
+  nextPageCursor: string | null;
+}
+
+/**
+ * Single page of `/v1/users/{id}/badges`. Returns the cursor so the caller
+ * can decide whether to walk further (lazy "Show all" expansion in the
+ * banned-profile rebuild lives on top of this).
+ */
+export async function getUserBadgesPage(
+  userId: number,
+  cursor = '',
+  limit = 100
+): Promise<UserBadgesPageResult> {
+  const data = await robloxFetch<UserBadgesPage>(
+    `https://badges.roblox.com/v1/users/${userId}/badges` +
+      `?limit=${Math.min(limit, 100)}&sortOrder=Desc` +
+      (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''),
+    {
+      cacheKey: `userBadges:${userId}:${cursor || 'first'}:${limit}`,
+      cacheTtlMs: 5 * 60_000,
+      retries: 1,
+    }
+  );
+  return { badges: data.data ?? [], nextPageCursor: data.nextPageCursor };
+}
+
+/**
+ * Walks every page of `/v1/users/{id}/badges`. Capped at `maxPages` so a
+ * user with tens of thousands of badges doesn't hang first paint.
+ */
+export async function getAllUserBadges(
+  userId: number,
+  maxPages = 20
+): Promise<BadgeDetail[]> {
+  const out: BadgeDetail[] = [];
+  let cursor = '';
+  for (let page = 0; page < maxPages; page += 1) {
+    const { badges, nextPageCursor } = await getUserBadgesPage(userId, cursor);
+    out.push(...badges);
+    if (!nextPageCursor) break;
+    cursor = nextPageCursor;
+  }
+  return out;
+}
+
 export async function getUserBadgeAwardedDates(
   userId: number,
   badgeIds: number[]

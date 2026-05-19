@@ -14,6 +14,7 @@ import {
   renameFolder,
   deleteFolder,
   removeGameFromFolder,
+  normalizeSelectedFolder,
   FoldersState,
   Folder,
 } from '@/storage/foldersStore';
@@ -1234,9 +1235,29 @@ const FOLDERS_STYLE_ID = 'bloxplus-folders-style';
 let foldersSubscribed = false;
 let lastFoldersState: FoldersState | null = null;
 let lastRenderedFolderSignature: string | null = null;
+let foldersRenderSeq = 0;
 // Module-level flag because the random pick must fire ONCE per page load,
 // not every observer tick. Resets naturally when the page is reloaded.
 let randomPickHandled = false;
+
+// Kick off the folders read at module load so `lastFoldersState` is usually
+// populated by the time `ensureFoldersSection` builds the DOM. Without this,
+// the section briefly renders with no data and the label flashes "No folders
+// yet" even when folders exist. Also subscribe to changes here so updates
+// fired before the section is mounted aren't missed.
+void getFolders().then((state) => {
+  lastFoldersState = state;
+  const sec = document.getElementById(FOLDERS_SECTION_ID);
+  if (sec instanceof HTMLElement) void renderFoldersSection(sec, state);
+});
+if (!foldersSubscribed) {
+  foldersSubscribed = true;
+  onFoldersChanged((state) => {
+    lastFoldersState = state;
+    const sec = document.getElementById(FOLDERS_SECTION_ID);
+    if (sec instanceof HTMLElement) void renderFoldersSection(sec, state);
+  });
+}
 
 function ensureFoldersSection(): HTMLElement {
   ensureFavoritesStyle();
@@ -1252,7 +1273,7 @@ function ensureFoldersSection(): HTMLElement {
         <div class="bp-fav-header-actions">
           <div class="bp-folder-picker">
             <button type="button" class="bp-folder-picker-trigger" data-folder-picker>
-              <span class="bp-folder-picker-label">No folders yet</span>
+              <span class="bp-folder-picker-label"></span>
               <span class="bp-folder-picker-caret">▾</span>
             </button>
           </div>
@@ -1306,15 +1327,9 @@ function ensureFoldersSection(): HTMLElement {
 
   ensureHomeListScroller(section);
 
-  if (!foldersSubscribed) {
-    foldersSubscribed = true;
-    onFoldersChanged((state) => {
-      lastFoldersState = state;
-      const sec = document.getElementById(FOLDERS_SECTION_ID);
-      if (sec instanceof HTMLElement) void renderFoldersSection(sec, state);
-    });
-  }
-
+  // Module-level prefetch (above) usually has `lastFoldersState` ready. The
+  // fallback path covers the rare case where this enhancer runs before that
+  // promise resolves.
   if (lastFoldersState) {
     void renderFoldersSection(section, lastFoldersState);
   } else {
@@ -1396,25 +1411,35 @@ async function renderFoldersSection(section: HTMLElement, state: FoldersState): 
     randomPickHandled = true;
   }
 
-  // If selection is invalid, snap to first available.
-  const selectedId =
-    state.selectedFolderId && state.folders.some((f) => f.id === state.selectedFolderId)
-      ? state.selectedFolderId
-      : state.folders[0]?.id ?? null;
+  // If selection is invalid, snap to the first available folder and repair
+  // storage. Keeping a dead selectedFolderId around makes later async render
+  // guards think the visible folder is stale, which can leave the row blank.
+  const selectedId = normalizeSelectedFolder(state);
+  if (selectedId !== state.selectedFolderId) {
+    state = { ...state, selectedFolderId: selectedId };
+    lastFoldersState = state;
+    void selectFolder(selectedId);
+  }
   const folder = state.folders.find((f) => f.id === selectedId) ?? null;
+  const row = section.querySelector<HTMLUListElement>('.bp-fav-row');
+  if (!row) return;
 
   // Skip re-render when nothing visible has changed. ensureFoldersSection is
   // called on every mutation tick by the home reorder loop; without this
   // guard we'd wipe + replace the tile row on every page mutation. The sort
   // setting is part of the signature so toggling sort triggers a re-render
-  // without changing the stored folder data.
+  // without changing the stored folder data. After returning from another
+  // overlay (Themes/UHBL), Roblox can hand us the same section with an empty
+  // row while the module-level signature still matches; force a repaint in
+  // that case instead of trusting the cached signature.
   const signature = folderRenderSignature(
     state.folders,
     selectedId,
     settings.foldersGamesSort
   );
-  if (signature === lastRenderedFolderSignature) return;
+  if (signature === lastRenderedFolderSignature && folderRowMatchesSelection(row, folder, state.folders.length)) return;
   lastRenderedFolderSignature = signature;
+  const renderSeq = ++foldersRenderSeq;
 
   // Header label + button enabled state.
   const label = section.querySelector<HTMLElement>('.bp-folder-picker-label');
@@ -1424,8 +1449,7 @@ async function renderFoldersSection(section: HTMLElement, state: FoldersState): 
     if (btn) btn.disabled = !folder;
   }
 
-  const row = section.querySelector<HTMLUListElement>('.bp-fav-row');
-  if (!row) return;
+  if (renderSeq !== foldersRenderSeq) return;
 
   if (!folder) {
     row.innerHTML = `<li class="bp-fav-empty">Create a folder, then add games from any game page.</li>`;
@@ -1462,8 +1486,9 @@ async function renderFoldersSection(section: HTMLElement, state: FoldersState): 
   }
   // Re-resolve the live state in case the selection changed while fetching.
   const live = await getFolders();
+  if (renderSeq !== foldersRenderSeq) return;
   const cur = live.folders.find((f) => f.id === folder.id);
-  if (!cur || cur.id !== state.selectedFolderId) return;
+  if (!cur || cur.id !== normalizeSelectedFolder(live)) return;
 
   // Sort by live player count per the user's preference. Games with no
   // playerCount fall to the bottom either direction so the sorted slice
@@ -1521,6 +1546,23 @@ function folderRenderSignature(
   const ids = cur ? cur.games.map((g) => g.universeId).join(',') : '';
   const folderList = folders.map((f) => `${f.id}:${f.name}:${f.games.length}`).join('|');
   return `${selectedId ?? ''}::${cur?.name ?? ''}::${ids}::${folderList}::${gamesSort}`;
+}
+
+function folderRowMatchesSelection(
+  row: HTMLUListElement,
+  folder: Folder | null,
+  folderCount: number
+): boolean {
+  if (!folder) return folderCount === 0 && row.querySelector('.bp-fav-empty') != null;
+  if (folder.games.length === 0) {
+    return row.querySelector('.bp-fav-empty')?.textContent?.includes(folder.name) ?? false;
+  }
+  const renderedIds = [...row.querySelectorAll<HTMLElement>('[data-bp-universe-id]')]
+    .map((el) => Number(el.dataset.bpUniverseId))
+    .filter((id) => Number.isFinite(id));
+  if (renderedIds.length !== folder.games.length) return false;
+  const expected = new Set(folder.games.map((g) => g.universeId));
+  return renderedIds.every((id) => expected.has(id));
 }
 
 interface FolderTileMeta {

@@ -191,7 +191,11 @@ function buildCss(themeId: string, custom: CustomTheme): string {
       padding: 10px 12px;
       color: #fff !important;
     }
-    body.bp-has-bg-image .bp-badge-row *,
+    /* Rarity-coded text on badge rows (.bp-rarity-easy / -medium / -hard /
+       -insane / -impossible) is explicitly excluded here so the badge
+       enhancer's per-tier colors keep their intent against the dark blur
+       overlay above. */
+    body.bp-has-bg-image .bp-badge-row *:not([class*="bp-rarity-"]),
     body.bp-has-bg-image .game-about-container *,
     body.bp-has-bg-image .game-description-container *,
     body.bp-has-bg-image .game-stat-container *,
@@ -3560,13 +3564,32 @@ async function applyCurrent(): Promise<void> {
     style.id = STYLE_ID;
     document.head.appendChild(style);
   }
-  style.textContent = buildCss(settings.themeId, custom);
-  applyBackgroundImage(custom, settings.themeId);
+  // Any user-saved preset (id `custom`, `custom-2`, …) renders through the
+  // same `'custom'` code path in buildCss / applyBackgroundImage. Built-in
+  // preset ids stay as-is so era-specific CSS (Classic 2016 etc.) keeps firing.
+  const isBuiltIn = PRESETS.some((p) => p.id === settings.themeId);
+  const effectiveThemeId = isBuiltIn ? settings.themeId : 'custom';
+  style.textContent = buildCss(effectiveThemeId, custom);
+  applyBackgroundImage(custom, effectiveThemeId);
   if (settings.themeId === 'classic-2016') {
     activateClassic2016Tweaks();
   } else {
     deactivateClassic2016Tweaks();
   }
+}
+
+/**
+ * Live-preview the background-image / mode / brightness from a theme draft
+ * without writing to storage. Mutates the canonical `#bloxplus-theme-bg`
+ * overlay so the user sees the image they just uploaded before they hit
+ * Apply. `null` reverts to the saved state by re-running `applyCurrent`.
+ */
+export function setBackgroundImagePreview(custom: CustomTheme | null): void {
+  if (!custom) {
+    void applyCurrent();
+    return;
+  }
+  applyBackgroundImage(custom, 'custom');
 }
 
 /**

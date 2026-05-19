@@ -4,6 +4,7 @@ import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
 import { getUserAvatarHeadshots, getGameIcons, getGroupIcons, getAssetThumbnails } from '@/api/thumbnails';
 import { getUserCollectibles, CollectibleAsset } from '@/api/accountValue';
 import { getUserGroups, getUserInventoryItems, InventoryItem, UserGroup } from '@/api/mutuals';
+import { ensureAnnotationsPrimed, getNickname } from '@/storage/profileAnnotations';
 
 const TAB_ID = 'mutuals';
 const ROOT_ID = 'bloxplus-mutuals-panel';
@@ -337,6 +338,7 @@ function bindPanel(root: HTMLElement, userId: number): void {
 }
 
 async function loadCategory(profileUserId: number, category: MutualCategory): Promise<string> {
+  await ensureAnnotationsPrimed();
   const myId = await getAuthenticatedUserId();
   if (!myId) return emptyState('Sign in to compare mutuals.');
   const isOwnProfile = myId === profileUserId;
@@ -543,6 +545,12 @@ function renderTile(row: AggregateRow): string {
   const image = row.thumb || fallbackThumb(row);
   const friendOwners = row.owners.filter((o) => typeof o.id === 'number');
   const hasFriendDropdown = friendOwners.length > 0;
+  // Append a private nickname for profile-type tiles only.
+  const profileMatch = row.href.match(/^\/users\/(\d+)\/profile$/);
+  const profileNickname = profileMatch ? getNickname(Number(profileMatch[1])) : null;
+  const nameWithNick = profileNickname
+    ? `${escapeHtml(row.name)} <span class="bp-mutual-nick">(${escapeHtml(profileNickname)})</span>`
+    : escapeHtml(row.name);
 
   let belowName = '';
   if (row.detail) {
@@ -551,10 +559,13 @@ function renderTile(row: AggregateRow): string {
   if (hasFriendDropdown) {
     const noun = friendOwners.length === 1 ? 'friend' : 'friends';
     const list = friendOwners
-      .map(
-        (o) =>
-          `<a class="bp-mutual-shared-link" href="/users/${o.id}/profile">${escapeHtml(o.name)}</a>`
-      )
+      .map((o) => {
+        const nick = typeof o.id === 'number' ? getNickname(o.id) : null;
+        const inner = nick
+          ? `${escapeHtml(o.name)} <span class="bp-mutual-nick">(${escapeHtml(nick)})</span>`
+          : escapeHtml(o.name);
+        return `<a class="bp-mutual-shared-link" href="/users/${o.id}/profile">${inner}</a>`;
+      })
       .join('');
     belowName += `
       <details class="bp-mutual-shared">
@@ -572,7 +583,7 @@ function renderTile(row: AggregateRow): string {
       <a class="bp-mutual-thumb" href="${escapeAttr(row.href)}" aria-label="${escapeAttr(row.name)}">
         ${image ? `<img src="${escapeAttr(image)}" alt="" data-bp-fallback="${initial}">` : initial}
       </a>
-      <a class="bp-mutual-name" href="${escapeAttr(row.href)}">${escapeHtml(row.name)}</a>
+      <a class="bp-mutual-name" href="${escapeAttr(row.href)}">${nameWithNick}</a>
       ${belowName}
     </div>
   `;
@@ -691,6 +702,11 @@ function ensureStyle(): void {
       font-weight: 700 !important;
       text-decoration: none !important;
       line-height: 1.25 !important;
+    }
+    #${ROOT_ID} .bp-mutual-nick {
+      font-weight: 500 !important;
+      color: rgba(197, 179, 255, 0.95) !important;
+      margin-left: 4px !important;
     }
     #${ROOT_ID} .bp-mutual-detail,
     #${ROOT_ID} .bp-mutuals-note {

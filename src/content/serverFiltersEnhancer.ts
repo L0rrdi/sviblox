@@ -737,33 +737,50 @@ function ensureStyle(): void {
     .bp-server-filters-clear-btn { margin-left: 6px; }
     /* Don't override Roblox's card-list layout — let Bootstrap's
        col-md-3 / col-sm-4 / col-xs-6 classes on each li place tiles. */
-    .bp-svi-list { padding: 0; list-style: none; }
+    .bp-svi-list {
+      padding: 0;
+      margin: 0;
+      list-style: none;
+      display: flow-root;
+      width: 100%;
+    }
+    .bp-svi-tile {
+      min-height: 276px;
+    }
+    .bp-svi-tile .card-item-public-server {
+      min-height: 258px;
+      height: auto;
+    }
     .bp-svi-thumbs {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      display: grid !important;
+      grid-template-columns: repeat(3, 44px);
+      justify-content: center;
       gap: 6px;
       padding: 8px;
+      width: 100% !important;
     }
     .bp-svi-avatar {
-      width: 100%;
-      aspect-ratio: 1 / 1;
+      width: 44px !important;
+      height: 44px !important;
+      min-width: 44px !important;
+      min-height: 44px !important;
       border-radius: 50%;
       overflow: hidden;
       background: rgba(255,255,255,0.08);
-      display: flex;
+      display: flex !important;
       align-items: center;
       justify-content: center;
       color: rgba(255,255,255,0.85);
       font-weight: 600;
     }
     .bp-svi-avatar .thumbnail-2d-container {
-      width: 100%;
-      height: 100%;
+      width: 100% !important;
+      height: 100% !important;
       display: block;
     }
     .bp-svi-avatar img {
-      width: 100%;
-      height: 100%;
+      width: 100% !important;
+      height: 100% !important;
       object-fit: cover;
       display: block;
     }

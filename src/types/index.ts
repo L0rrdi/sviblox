@@ -37,6 +37,27 @@ export interface CustomTheme {
   backgroundBrightness?: number;
 }
 
+/**
+ * A user-saved theme. The id is what `settings.themeId` stores; the legacy
+ * single-custom-theme slot migrates into id `custom` with name `Custom #1`.
+ * Subsequent user-created presets use ids `custom-2`, `custom-3`, …
+ */
+export interface UserThemeEntry {
+  id: string;
+  name: string;
+  theme: CustomTheme;
+}
+
+export interface ThemeSchedule {
+  enabled: boolean;
+  lightThemeId: string;
+  darkThemeId: string;
+  /** Local 24-hour time in HH:mm format. */
+  lightStartsAt: string;
+  /** Local 24-hour time in HH:mm format. */
+  darkStartsAt: string;
+}
+
 export interface Settings {
   /**
    * Bundles all home-page layout features: Favorites + My Games + Folders
@@ -53,6 +74,11 @@ export interface Settings {
    */
   playtimeTracker: boolean;
   showGameBadges: boolean;
+  /**
+   * Tints the badge rarity percentage by tier (easy → green, impossible →
+   * purple). Off = uniform text color matching the rest of the badge row.
+   */
+  showBadgeRarityColors: boolean;
   showGameStoreDevProducts: boolean;
   showGameSubplaces: boolean;
   showTotalSpent: boolean;
@@ -64,7 +90,21 @@ export interface Settings {
   showThemes: boolean;
   /** Adds the "UHBL" entry to the left nav and lets the UHBL overlay mount. */
   showUhbl: boolean;
+  /**
+   * Profile notes + nicknames: editable card on other users' profiles and
+   * the (nickname) cosmetic appended to displayed names site-wide.
+   */
+  showProfileNotes: boolean;
+  /**
+   * Single-key hotkeys mapping `destinationId -> keyChar`. Destinations are
+   * the well-known IDs in `src/content/hotkeyDestinations.ts` or dynamic
+   * `folder-game:{universeId}` IDs for games saved in local folders. Keys are
+   * already lowercased + single-character. Hold `|` while no input is focused
+   * to see the live binding list.
+   */
+  gameHotkeys: Record<string, string>;
   themeId: string;
+  themeSchedule: ThemeSchedule;
   homeWidgetWindow: string;
 }
 
@@ -99,6 +139,7 @@ export const DEFAULT_SETTINGS: Settings = {
   foldersGamesSort: 'most-active',
   playtimeTracker: false,
   showGameBadges: true,
+  showBadgeRarityColors: true,
   showGameStoreDevProducts: true,
   showGameSubplaces: true,
   showTotalSpent: false,
@@ -108,6 +149,15 @@ export const DEFAULT_SETTINGS: Settings = {
   robuxCashRate: 'regular',
   showThemes: true,
   showUhbl: true,
+  showProfileNotes: false,
+  gameHotkeys: {},
   themeId: 'default',
+  themeSchedule: {
+    enabled: false,
+    lightThemeId: 'default',
+    darkThemeId: 'dark-blue',
+    lightStartsAt: '07:00',
+    darkStartsAt: '19:00',
+  },
   homeWidgetWindow: 'all',
 };

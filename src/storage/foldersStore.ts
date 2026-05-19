@@ -104,3 +104,9 @@ function makeId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `f_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
+
+export function normalizeSelectedFolder(state: FoldersState): string | null {
+  return state.selectedFolderId && state.folders.some((f) => f.id === state.selectedFolderId)
+    ? state.selectedFolderId
+    : state.folders[0]?.id ?? null;
+}

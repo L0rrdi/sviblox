@@ -171,6 +171,29 @@ export async function getAssetThumbnails(assetIds: number[]): Promise<Map<number
   return out;
 }
 
+export async function getBundleThumbnails(bundleIds: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>();
+  if (!bundleIds.length) return out;
+  for (let i = 0; i < bundleIds.length; i += 100) {
+    const batch = bundleIds.slice(i, i + 100);
+    const url =
+      `https://thumbnails.roblox.com/v1/bundles/thumbnails?bundleIds=${batch.join(',')}` +
+      `&size=150x150&format=Png&isCircular=false`;
+    try {
+      const data = await robloxFetch<ThumbResponse>(url, {
+        cacheKey: `bundleThumbs:${batch.join(',')}`,
+        cacheTtlMs: 24 * 60 * 60_000,
+      });
+      for (const t of data.data ?? []) {
+        if (t.state === 'Completed') out.set(t.targetId, t.imageUrl);
+      }
+    } catch {
+      // continue
+    }
+  }
+  return out;
+}
+
 export async function getDeveloperProductIcons(
   developerProductIds: number[]
 ): Promise<Map<number, string>> {

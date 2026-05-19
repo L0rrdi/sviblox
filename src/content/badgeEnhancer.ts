@@ -21,6 +21,7 @@ interface RenderState {
   icons: Map<number, string>;
   filter: BadgeFilter;
   sort: BadgeSort;
+  colorRarity: boolean;
 }
 let state: RenderState | null = null;
 
@@ -55,10 +56,25 @@ export async function run(): Promise<void> {
   }
 
   // If we've already rendered for this place, just make sure the existing
-  // container stays hidden and our section stays in place.
+  // container stays hidden and our section stays in place. Settings can
+  // change between dispatches (rarity-color toggle) — if `colorRarity`
+  // no longer matches the current setting, refresh the section instead of
+  // short-circuiting.
   const sectionInDom = !!document.getElementById(SECTION_ID);
-  if (renderedFor === placeId && sectionInDom) {
+  const wantsColor = Boolean(settings.showBadgeRarityColors);
+  if (
+    renderedFor === placeId &&
+    sectionInDom &&
+    state &&
+    state.colorRarity === wantsColor
+  ) {
     if (container.style.display !== 'none') hideExisting(container);
+    return;
+  }
+  if (renderedFor === placeId && sectionInDom && state) {
+    state.colorRarity = wantsColor;
+    const sec = document.getElementById(SECTION_ID);
+    if (sec instanceof HTMLElement) renderSection(sec);
     return;
   }
 
@@ -103,6 +119,7 @@ export async function run(): Promise<void> {
       icons,
       filter: state?.filter ?? 'all',
       sort: state?.sort ?? 'default',
+      colorRarity: Boolean(settings.showBadgeRarityColors),
     };
     renderSection(section);
     renderedFor = placeId;
@@ -332,7 +349,14 @@ function renderSection(section: HTMLElement): void {
     </div>
     <div class="bp-badges-list">
       ${list
-        .map((b) => renderBadge(b, state!.ownership.get(b.id) ?? null, state!.icons.get(b.id)))
+        .map((b) =>
+          renderBadge(
+            b,
+            state!.ownership.get(b.id) ?? null,
+            state!.icons.get(b.id),
+            state!.colorRarity
+          )
+        )
         .join('')}
     </div>
   `;
@@ -406,12 +430,13 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
 function renderBadge(
   b: BadgeDetail,
   awardedDate: string | null,
-  icon: string | undefined
+  icon: string | undefined,
+  colorRarity: boolean
 ): string {
   const owned = !!awardedDate;
   const url = `https://www.roblox.com/badges/${b.id}/${slug(b.displayName ?? b.name)}`;
   const winRate = b.statistics?.winRatePercentage;
-  const rarityClass = rarityBucket(winRate);
+  const rarityClass = colorRarity ? rarityBucket(winRate) : '';
   const rarityLabel = rarityName(winRate);
   const winRateStr =
     typeof winRate === 'number' ? `${(winRate * 100).toFixed(1)}%` : '—';

@@ -38,8 +38,14 @@ export async function run(): Promise<void> {
 }
 
 function decorateNativeTiles(): void {
+  // Two native tile shapes: standard square `.game-card.game-tile` (Continue,
+  // Recommended grid, Charts, /discover) and the wider
+  // `.featured-game-container.game-card-container` used by Standout / event
+  // rows. The latter wraps everything in <a>, exposes universeId only in the
+  // href query, and uses `.featured-game-icon-container` instead of
+  // `.game-card-thumb-container`.
   const tiles = document.querySelectorAll<HTMLElement>(
-    `.game-card.game-tile:not([${DECORATED_ATTR}])`
+    `.game-card.game-tile:not([${DECORATED_ATTR}]), .featured-game-container.game-card-container:not([${DECORATED_ATTR}])`
   );
   for (const tile of tiles) {
     // SviBlox tiles already have the button baked into their HTML — flag
@@ -51,10 +57,16 @@ function decorateNativeTiles(): void {
     }
     const link = tile.querySelector<HTMLAnchorElement>('a.game-card-link');
     if (!link) continue;
-    const universeId = Number(link.id);
+    let universeId = Number(link.id);
+    if (!Number.isFinite(universeId) || universeId <= 0) {
+      const m = (link.href || '').match(/[?&]universeId=(\d+)/);
+      universeId = m ? Number(m[1]) : NaN;
+    }
     if (!Number.isFinite(universeId) || universeId <= 0) continue;
 
-    const thumb = tile.querySelector<HTMLElement>('.game-card-thumb-container');
+    const thumb =
+      tile.querySelector<HTMLElement>('.game-card-thumb-container') ??
+      tile.querySelector<HTMLElement>('.featured-game-icon-container');
     if (!thumb) continue;
 
     const placeIdMatch = (link.href || '').match(/\/games\/(\d+)/);
@@ -171,6 +183,7 @@ function ensureStyle(): void {
   // render on Charts, /discover, etc.
   style.textContent = `
     .game-card .bp-tile-add-folder,
+    .featured-game-container .bp-tile-add-folder,
     .bp-fav-tile .bp-tile-add-folder {
       position: absolute; top: 6px; left: 6px;
       width: 26px; height: 26px;
@@ -182,7 +195,8 @@ function ensureStyle(): void {
       padding: 0;
       z-index: 3;
     }
-    .game-card:hover .bp-tile-add-folder { display: inline-flex; }
+    .game-card:hover .bp-tile-add-folder,
+    .featured-game-container:hover .bp-tile-add-folder { display: inline-flex; }
     /* Stay visible when the game is already filed. */
     .bp-tile-add-folder.bp-in-folder { display: inline-flex; }
     .bp-tile-add-folder:hover { background: rgba(74,144,226,0.85); }

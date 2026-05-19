@@ -3,27 +3,49 @@
  * content area, triggered by `location.hash === '#bloxplus-themes'`.
  * Roblox's left nav, header, and chat remain functional; only the home
  * main content gets replaced.
+ *
+ * Save model: edits to the active theme (colors, image, brightness, mode)
+ * are buffered in a draft and previewed live. Clicking Apply opens a small
+ * modal — Overwrite / New / Cancel when the active theme is a user-saved
+ * preset, or just New / Cancel when it's a built-in preset. "New" prompts
+ * for a name (prefilled with the next "Custom #N") and creates a new user
+ * preset which becomes active.
  */
 
 import { getSettings, setSettings } from '@/storage/settingsStore';
 import {
   getCustomTheme,
-  setCustomTheme,
+  getUserThemes,
+  createUserTheme,
+  deleteUserTheme,
+  renameUserTheme,
+  overwriteUserTheme,
+  suggestNextUserTheme,
   setCustomThemeBackground,
   removeCustomThemeBackground,
   clearCustomTheme,
 } from '@/storage/themeStore';
-import { getPresets, setPreviewTheme, setBackgroundBrightnessPreview } from './themeInjector';
-import { CustomTheme } from '@/types';
+import {
+  getPresets,
+  setPreviewTheme,
+  setBackgroundBrightnessPreview,
+  setBackgroundImagePreview,
+} from './themeInjector';
+import {
+  getThemeScheduleChoices,
+  resolveThemeSchedule,
+  sanitizeThemeSchedule,
+} from '@/storage/themeSchedule';
+import { CustomTheme, UserThemeEntry } from '@/types';
 
 const PAGE_ID = 'bloxplus-themes-page';
 const STYLE_ID = 'bloxplus-themes-page-style';
+const MODAL_ID = 'bloxplus-themes-modal';
 const HIDE_ATTR = 'data-bp-themes-hidden';
-const MAX_IMAGE_BYTES = 16 * 1024 * 1024; // Supports typical compressed 4K backgrounds.
+const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
 function isThemesRoute(): boolean {
-  const h = location.hash.replace(/^#/, '');
-  return h === 'bloxplus-themes';
+  return location.hash.replace(/^#/, '') === 'bloxplus-themes';
 }
 
 function ensureStyle(): void {
@@ -31,11 +53,7 @@ function ensureStyle(): void {
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
-    #${PAGE_ID} {
-      padding: 24px 0;
-      color: inherit;
-      font-family: inherit;
-    }
+    #${PAGE_ID} { padding: 24px 0; color: inherit; font-family: inherit; }
     #${PAGE_ID} h1 { font-size: 28px; margin: 0 0 8px 0; font-weight: 700; }
     #${PAGE_ID} p.bp-tp-sub { margin: 0 0 24px 0; opacity: 0.7; font-size: 14px; }
 
@@ -46,9 +64,7 @@ function ensureStyle(): void {
       padding: 20px;
       margin-bottom: 20px;
     }
-    #${PAGE_ID} .bp-tp-section h2 {
-      font-size: 18px; margin: 0 0 14px 0; font-weight: 600;
-    }
+    #${PAGE_ID} .bp-tp-section h2 { font-size: 18px; margin: 0 0 14px 0; font-weight: 600; }
 
     #${PAGE_ID} .bp-presets {
       display: grid;
@@ -56,6 +72,7 @@ function ensureStyle(): void {
       gap: 12px;
     }
     #${PAGE_ID} .bp-preset {
+      position: relative;
       border: 2px solid rgba(255,255,255,0.1);
       border-radius: 8px;
       padding: 12px;
@@ -72,17 +89,48 @@ function ensureStyle(): void {
       background: linear-gradient(135deg, var(--s-bg, #15171c) 50%, var(--s-card, #2a2d35) 50%);
       border: 1px solid rgba(255,255,255,0.1);
     }
+    /* When a user preset has a background image, show that as the swatch
+       instead of the palette gradient. The image is set via JS (data URLs
+       don't survive inline style attributes). */
+    #${PAGE_ID} .bp-preset-swatch[data-has-image] {
+      background-color: #000;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
     #${PAGE_ID} .bp-preset-name { font-weight: 600; font-size: 14px; }
     #${PAGE_ID} .bp-preset-id { font-size: 11px; opacity: 0.55; }
+    #${PAGE_ID} .bp-preset-add {
+      border-style: dashed;
+      border-color: rgba(255,255,255,0.25);
+      align-items: center; justify-content: center;
+      text-align: center; min-height: 116px;
+      color: rgba(255,255,255,0.75);
+    }
+    #${PAGE_ID} .bp-preset-add:hover { border-color: #4a90e2; color: #fff; }
+    #${PAGE_ID} .bp-preset-add .bp-preset-add-icon {
+      font-size: 26px; line-height: 1; font-weight: 300; margin-bottom: 4px;
+    }
+    #${PAGE_ID} .bp-preset-tools {
+      position: absolute; top: 6px; right: 6px;
+      display: none; gap: 4px;
+    }
+    #${PAGE_ID} .bp-preset:hover .bp-preset-tools { display: inline-flex; }
+    #${PAGE_ID} .bp-preset-tools button {
+      padding: 2px 6px; font-size: 11px;
+      background: rgba(0,0,0,0.55); color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 4px; cursor: pointer;
+    }
+    #${PAGE_ID} .bp-preset-tools button:hover { background: rgba(74,144,226,0.8); }
+    #${PAGE_ID} .bp-preset-tools button.bp-danger:hover { background: rgba(217,83,79,0.85); }
 
     #${PAGE_ID} .bp-color-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
       gap: 14px;
     }
-    #${PAGE_ID} .bp-color-row {
-      display: flex; align-items: center; gap: 10px;
-    }
+    #${PAGE_ID} .bp-color-row { display: flex; align-items: center; gap: 10px; }
     #${PAGE_ID} .bp-color-row label { flex: 1; font-size: 13px; }
     #${PAGE_ID} .bp-color-row input[type="color"] {
       width: 44px; height: 32px; border: 1px solid rgba(255,255,255,0.18);
@@ -94,9 +142,7 @@ function ensureStyle(): void {
       border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
     }
 
-    #${PAGE_ID} .bp-bg-controls {
-      display: flex; flex-direction: column; gap: 12px;
-    }
+    #${PAGE_ID} .bp-bg-controls { display: flex; flex-direction: column; gap: 12px; }
     #${PAGE_ID} .bp-bg-preview {
       width: 100%; max-height: 220px; min-height: 120px;
       background: #15171c center/cover no-repeat;
@@ -105,22 +151,42 @@ function ensureStyle(): void {
       display: flex; align-items: center; justify-content: center;
       font-size: 12px; opacity: 0.7;
     }
-    #${PAGE_ID} .bp-bg-row {
-      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    #${PAGE_ID} .bp-bg-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+    #${PAGE_ID} .bp-schedule-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    #${PAGE_ID} .bp-schedule-field {
+      display: flex; flex-direction: column; gap: 6px;
+      font-size: 13px;
+    }
+    #${PAGE_ID} .bp-schedule-field select,
+    #${PAGE_ID} .bp-schedule-field input[type="time"] {
+      padding: 7px 8px;
+      background: #1a1d24; color: inherit;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 4px;
+      color-scheme: dark;
+    }
+    #${PAGE_ID} .bp-schedule-toggle {
+      display: inline-flex; gap: 8px; align-items: center;
+      font-size: 13px; margin-bottom: 14px;
+    }
+    #${PAGE_ID} .bp-schedule-note {
+      font-size: 12px; opacity: 0.7; margin-top: 10px; min-height: 16px;
     }
 
     #${PAGE_ID} .bp-actions {
       display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;
     }
     #${PAGE_ID} button.bp-btn {
-      padding: 8px 14px;
-      font-size: 13px;
-      font-weight: 500;
+      padding: 8px 14px; font-size: 13px; font-weight: 500;
       border-radius: 4px;
       border: 1px solid rgba(255,255,255,0.18);
       background: rgba(255,255,255,0.06);
-      color: inherit;
-      cursor: pointer;
+      color: inherit; cursor: pointer;
     }
     #${PAGE_ID} button.bp-btn:hover { background: rgba(255,255,255,0.12); }
     #${PAGE_ID} button.bp-btn.bp-btn-primary {
@@ -135,36 +201,68 @@ function ensureStyle(): void {
       border: 1px solid rgba(255,255,255,0.18);
       border-radius: 4px; cursor: pointer;
     }
-    #${PAGE_ID} .bp-brightness-label {
-      display: flex; align-items: center; gap: 10px;
-      font-size: 13px;
-    }
-    #${PAGE_ID} .bp-brightness-label input[type="range"] {
-      flex: 1; max-width: 320px; accent-color: #4a90e2;
-    }
-    #${PAGE_ID} .bp-brightness-label input[type="range"]:disabled {
-      opacity: 0.4;
-    }
+    #${PAGE_ID} .bp-brightness-label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    #${PAGE_ID} .bp-brightness-label input[type="range"] { flex: 1; max-width: 320px; accent-color: #4a90e2; }
     #${PAGE_ID} [data-bg-brightness-readout] {
-      font-variant-numeric: tabular-nums; min-width: 44px; text-align: right;
-      opacity: 0.8;
+      font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; opacity: 0.8;
     }
-    #${PAGE_ID} .bp-status {
-      font-size: 12px; opacity: 0.7; margin-top: 8px; min-height: 14px;
-    }
-    /* Sticky Apply/Cancel bar that appears under the palette while editing. */
-    #${PAGE_ID} .bp-palette-actions {
+    #${PAGE_ID} .bp-status { font-size: 12px; opacity: 0.7; margin-top: 8px; min-height: 14px; }
+
+    /* Sticky Apply/Cancel bar that appears while editing. */
+    #${PAGE_ID} .bp-draft-bar {
+      position: sticky; bottom: 12px;
       display: flex; gap: 10px; align-items: center;
-      margin-top: 16px; padding-top: 14px;
-      border-top: 1px solid rgba(255,255,255,0.08);
+      margin-top: 16px; padding: 12px 14px;
+      border-radius: 8px;
+      background: rgba(20,22,28,0.92);
+      backdrop-filter: blur(6px);
+      border: 1px solid rgba(255,255,255,0.12);
       opacity: 0; pointer-events: none;
       transition: opacity 0.15s ease;
+      z-index: 2;
     }
-    #${PAGE_ID} .bp-palette-actions.bp-dirty {
-      opacity: 1; pointer-events: auto;
-    }
-    #${PAGE_ID} .bp-palette-actions .bp-dirty-label {
+    #${PAGE_ID} .bp-draft-bar.bp-dirty { opacity: 1; pointer-events: auto; }
+    #${PAGE_ID} .bp-draft-bar .bp-dirty-label {
       font-size: 12px; opacity: 0.75; margin-left: auto;
+    }
+
+    /* Modal */
+    #${MODAL_ID} {
+      position: fixed; inset: 0; z-index: 9999;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55);
+    }
+    #${MODAL_ID} .bp-modal-box {
+      min-width: 320px; max-width: 480px;
+      background: #1c1f26; color: #fff;
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 10px;
+      padding: 22px 24px;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.5);
+      font-family: inherit;
+    }
+    #${MODAL_ID} h3 { margin: 0 0 10px 0; font-size: 17px; font-weight: 600; }
+    #${MODAL_ID} p { margin: 0 0 16px 0; font-size: 13px; opacity: 0.85; line-height: 1.5; }
+    #${MODAL_ID} input[type="text"] {
+      width: 100%; padding: 8px 10px; margin-bottom: 16px;
+      background: #14171d; color: inherit;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      font: inherit; font-size: 14px;
+    }
+    #${MODAL_ID} input[type="text"]:focus { outline: 2px solid #4a90e2; outline-offset: -1px; }
+    #${MODAL_ID} .bp-modal-actions {
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+    #${MODAL_ID} .bp-modal-actions button {
+      padding: 7px 14px; font-size: 13px; font-weight: 500;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.06);
+      color: inherit; cursor: pointer;
+    }
+    #${MODAL_ID} .bp-modal-actions button:hover { background: rgba(255,255,255,0.12); }
+    #${MODAL_ID} .bp-modal-actions button.bp-primary {
+      background: #4a90e2; border-color: #4a90e2; color: #fff;
     }
   `;
   document.head.appendChild(style);
@@ -184,7 +282,6 @@ function hideHomeContent(host: HTMLElement): void {
   for (const child of host.children) {
     if (!(child instanceof HTMLElement)) continue;
     if (child.id === PAGE_ID) continue;
-    // Don't hide another SviBlox overlay if it's still in the DOM mid-handoff.
     if (SIBLING_OVERLAY_IDS.includes(child.id)) continue;
     if (!child.hasAttribute(HIDE_ATTR)) {
       child.style.display = 'none';
@@ -194,11 +291,8 @@ function hideHomeContent(host: HTMLElement): void {
 }
 
 function restoreHomeContent(): void {
-  // If we're handing off to another SviBlox overlay, leave the home content
-  // hidden — that overlay needs the same display:none state. Just drop our
-  // tag so we don't try to clear again later.
-  const handoff = OVERLAY_HASHES.includes(location.hash.replace(/^#/, '')) &&
-    !isThemesRoute();
+  const handoff =
+    OVERLAY_HASHES.includes(location.hash.replace(/^#/, '')) && !isThemesRoute();
   for (const el of document.querySelectorAll(`[${HIDE_ATTR}]`)) {
     if (!(el instanceof HTMLElement)) continue;
     if (!handoff) el.style.display = '';
@@ -209,9 +303,6 @@ function restoreHomeContent(): void {
 async function mountPage(host: HTMLElement): Promise<void> {
   let page = document.getElementById(PAGE_ID);
   if (page) {
-    // Already mounted — make sure it's still attached to the home host
-    // (in case React replaced the home container) and exit. Do NOT re-render,
-    // because that would wipe inputs/focus on every mutation tick.
     if (page.parentElement !== host) host.appendChild(page);
     return;
   }
@@ -221,16 +312,117 @@ async function mountPage(host: HTMLElement): Promise<void> {
   await render(page);
 }
 
+// ── Modal helpers ─────────────────────────────────────────────────────────
+
+function openNameModal(opts: { title: string; defaultValue: string; confirmLabel: string }): Promise<string | null> {
+  return new Promise((resolve) => {
+    const root = document.createElement('div');
+    root.id = MODAL_ID;
+    root.innerHTML = `
+      <div class="bp-modal-box" role="dialog" aria-modal="true">
+        <h3>${escapeHtml(opts.title)}</h3>
+        <input type="text" data-name-input value="${escapeHtml(opts.defaultValue)}" />
+        <div class="bp-modal-actions">
+          <button data-act="cancel">Cancel</button>
+          <button class="bp-primary" data-act="confirm">${escapeHtml(opts.confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(root);
+    const input = root.querySelector<HTMLInputElement>('[data-name-input]')!;
+    input.focus();
+    input.select();
+    const cleanup = (value: string | null) => {
+      root.remove();
+      resolve(value);
+    };
+    root.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === root) return cleanup(null);
+      const act = t.closest<HTMLElement>('[data-act]')?.dataset.act;
+      if (act === 'confirm') return cleanup(input.value.trim() || opts.defaultValue);
+      if (act === 'cancel') return cleanup(null);
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') cleanup(input.value.trim() || opts.defaultValue);
+      else if (e.key === 'Escape') cleanup(null);
+    });
+  });
+}
+
+function openConfirmModal(opts: { title: string; body: string; confirmLabel: string; danger?: boolean }): Promise<boolean> {
+  return new Promise((resolve) => {
+    const root = document.createElement('div');
+    root.id = MODAL_ID;
+    root.innerHTML = `
+      <div class="bp-modal-box" role="dialog" aria-modal="true">
+        <h3>${escapeHtml(opts.title)}</h3>
+        <p>${escapeHtml(opts.body)}</p>
+        <div class="bp-modal-actions">
+          <button data-act="cancel">Cancel</button>
+          <button class="bp-primary" data-act="confirm">${escapeHtml(opts.confirmLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(root);
+    const cleanup = (v: boolean) => { root.remove(); resolve(v); };
+    root.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t === root) return cleanup(false);
+      const act = t.closest<HTMLElement>('[data-act]')?.dataset.act;
+      if (act === 'confirm') return cleanup(true);
+      if (act === 'cancel') return cleanup(false);
+    });
+    document.addEventListener('keydown', function onKey(e) {
+      if (e.key === 'Escape') {
+        document.removeEventListener('keydown', onKey);
+        cleanup(false);
+      }
+    });
+  });
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+
 async function render(page: HTMLElement): Promise<void> {
   const settings = await getSettings();
   const custom = await getCustomTheme();
+  const userThemes = await getUserThemes();
   const presets = getPresets();
   const activeId = settings.themeId;
+  const activeEntry: UserThemeEntry | null = userThemes.entries[activeId] ?? null;
+  const schedule = sanitizeThemeSchedule(settings.themeSchedule, userThemes);
+  const scheduleResolution = resolveThemeSchedule({ ...settings, themeSchedule: schedule }, userThemes);
+  const scheduleChoices = getThemeScheduleChoices(userThemes);
+  const scheduleSlotKey = scheduleResolution?.slot === 'dark' ? 'darkThemeId' : 'lightThemeId';
+  const activationPatch = (themeId: string) => ({
+    themeId,
+    ...(schedule.enabled
+      ? { themeSchedule: { ...schedule, [scheduleSlotKey]: themeId } }
+      : {}),
+  });
 
   const setStatus = (msg: string) => {
     const el = page.querySelector('.bp-status');
     if (el) el.textContent = msg;
   };
+
+  const scheduleOption = (selectedId: string): string =>
+    scheduleChoices
+      .map((choice) => {
+        const label = `${choice.name}${choice.kind === 'custom' ? ' (custom)' : ''}`;
+        return `<option value="${escapeHtml(choice.id)}" ${choice.id === selectedId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      })
+      .join('');
+
+  const scheduleNote =
+    schedule.enabled && scheduleResolution
+      ? `Currently using ${scheduleChoices.find((choice) => choice.id === scheduleResolution.themeId)?.name ?? scheduleResolution.themeId} until ${scheduleResolution.slot === 'light' ? schedule.darkStartsAt : schedule.lightStartsAt}.`
+      : 'Schedule is off. Your selected preset stays active until you change it.';
 
   const colorRow = (
     key: keyof CustomTheme,
@@ -249,46 +441,59 @@ async function render(page: HTMLElement): Promise<void> {
     `;
   };
 
+  const builtInTiles = presets
+    .map(
+      (p) => `
+      <div class="bp-preset ${p.id === activeId ? 'bp-active' : ''}" data-preset="${p.id}"
+           style="--s-bg:${p.vars?.background ?? '#15171c'}; --s-card:${p.vars?.nav ?? '#2a2d35'};">
+        <div class="bp-preset-swatch"></div>
+        <div class="bp-preset-name">${escapeHtml(p.name)}</div>
+        <div class="bp-preset-id">built-in</div>
+      </div>
+    `
+    )
+    .join('');
+
+  const userTiles = userThemes.order
+    .map((id) => userThemes.entries[id])
+    .filter((e): e is UserThemeEntry => !!e)
+    .map(
+      (e) => `
+      <div class="bp-preset ${e.id === activeId ? 'bp-active' : ''}" data-preset="${e.id}" data-user-preset="${e.id}"
+           style="--s-bg:${e.theme.background ?? '#222'}; --s-card:${e.theme.nav ?? '#444'};">
+        <div class="bp-preset-tools">
+          <button data-tool="rename" data-id="${e.id}">Rename</button>
+          <button class="bp-danger" data-tool="delete" data-id="${e.id}">Delete</button>
+        </div>
+        <div class="bp-preset-swatch"></div>
+        <div class="bp-preset-name">${escapeHtml(e.name)}</div>
+        <div class="bp-preset-id">${e.id}</div>
+      </div>
+    `
+    )
+    .join('');
+
   page.innerHTML = `
     <h1>Themes</h1>
     <p class="bp-tp-sub">Customise SviBlox's look across roblox.com. Select a built-in preset, mix your own palette, or upload an image to use as a background.</p>
 
     <div class="bp-tp-section">
-      <h2>Built-in presets</h2>
-      <div class="bp-presets">
-        ${presets
-          .map(
-            (p) => `
-          <div class="bp-preset ${p.id === activeId ? 'bp-active' : ''}" data-preset="${p.id}"
-               style="--s-bg:${p.vars?.background ?? '#15171c'}; --s-card:${p.vars?.nav ?? '#2a2d35'};">
-            <div class="bp-preset-swatch"></div>
-            <div class="bp-preset-name">${p.name}</div>
-            <div class="bp-preset-id">${p.id}</div>
-          </div>
-        `
-          )
-          .join('')}
-        <div class="bp-preset ${activeId === 'custom' ? 'bp-active' : ''}" data-preset="custom"
-             style="--s-bg:${custom.background ?? '#222'}; --s-card:${custom.nav ?? '#444'};">
-          <div class="bp-preset-swatch"></div>
-          <div class="bp-preset-name">Custom</div>
-          <div class="bp-preset-id">your palette below</div>
+      <h2>Presets</h2>
+      <div class="bp-presets">${builtInTiles}${userTiles}
+        <div class="bp-preset bp-preset-add" data-action="new-preset" role="button" tabindex="0" title="Create an empty preset">
+          <div class="bp-preset-add-icon">+</div>
+          <div class="bp-preset-name">New preset</div>
         </div>
       </div>
     </div>
 
     <div class="bp-tp-section">
-      <h2>Custom palette</h2>
-      <p class="bp-tp-sub" style="margin: 0 0 14px 0;">Changes preview live. Press Apply to save, Cancel to discard.</p>
+      <h2>Palette</h2>
+      <p class="bp-tp-sub" style="margin: 0 0 14px 0;">Changes preview live. Apply saves them to a preset.</p>
       <div class="bp-color-grid">
         ${colorRow('background', 'Page background', '#0e0f12')}
         ${colorRow('nav', 'Navigation', '#0a0b0e')}
         ${colorRow('text', 'Text', '#ffffff', 'accent')}
-      </div>
-      <div class="bp-palette-actions" data-palette-actions>
-        <button class="bp-btn bp-btn-primary" data-action="palette-apply">Apply</button>
-        <button class="bp-btn" data-action="palette-cancel">Cancel</button>
-        <span class="bp-dirty-label" data-palette-dirty>Unsaved changes</span>
       </div>
       <div class="bp-actions">
         <button class="bp-btn" data-action="reset-palette">Reset palette</button>
@@ -318,62 +523,170 @@ async function render(page: HTMLElement): Promise<void> {
           <label class="bp-brightness-label">Brightness
             <input type="range" min="0" max="200" step="1"
                    value="${clampBrightnessForUI(custom.backgroundBrightness)}"
-                   data-bg-brightness ${custom.backgroundImage ? '' : 'disabled'} />
+                   data-bg-brightness />
             <span data-bg-brightness-readout>${clampBrightnessForUI(custom.backgroundBrightness)}%</span>
           </label>
         </div>
         <div class="bp-status"></div>
       </div>
     </div>
+
+    <div class="bp-tp-section">
+      <h2>Theme schedule</h2>
+      <label class="bp-schedule-toggle">
+        <input type="checkbox" data-schedule-enabled ${schedule.enabled ? 'checked' : ''} />
+        Enable automatic theme schedule
+      </label>
+      <div class="bp-schedule-grid">
+        <label class="bp-schedule-field">Light preset
+          <select data-schedule-theme="lightThemeId">
+            ${scheduleOption(schedule.lightThemeId)}
+          </select>
+        </label>
+        <label class="bp-schedule-field">Dark preset
+          <select data-schedule-theme="darkThemeId">
+            ${scheduleOption(schedule.darkThemeId)}
+          </select>
+        </label>
+        <label class="bp-schedule-field">Light starts
+          <input type="time" value="${escapeHtml(schedule.lightStartsAt)}" data-schedule-time="lightStartsAt" />
+        </label>
+        <label class="bp-schedule-field">Dark starts
+          <input type="time" value="${escapeHtml(schedule.darkStartsAt)}" data-schedule-time="darkStartsAt" />
+        </label>
+      </div>
+      <div class="bp-schedule-note">${escapeHtml(scheduleNote)}</div>
+    </div>
+
+    <div class="bp-draft-bar" data-draft-bar>
+      <button class="bp-btn bp-btn-primary" data-action="apply">Apply</button>
+      <button class="bp-btn" data-action="discard">Discard</button>
+      <span class="bp-dirty-label">Unsaved changes — Apply to save them to a preset.</span>
+    </div>
   `;
 
-  // Data-URL backgrounds can't be inlined into a style attribute via innerHTML —
-  // the `"` chars in JSON.stringify(url) collide with the outer attribute quotes
-  // and the HTML parser shreds the URL into bogus attributes. Set it directly.
+  // Data-URL backgrounds can't ride inside a style attribute via innerHTML.
   if (custom.backgroundImage) {
     const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
     if (preview) preview.style.backgroundImage = `url(${JSON.stringify(custom.backgroundImage)})`;
   }
-
-  // --- Wiring ---
-
-  // Preset selection.
-  for (const el of page.querySelectorAll<HTMLElement>('[data-preset]')) {
-    el.addEventListener('click', async () => {
-      const id = el.dataset.preset!;
-      await setSettings({ themeId: id });
-      setStatus(`Active theme: ${id}`);
-      await render(page); // refresh active state
-    });
+  // Paint each user preset's swatch with its own backgroundImage when set.
+  for (const id of userThemes.order) {
+    const entry = userThemes.entries[id];
+    if (!entry?.theme.backgroundImage) continue;
+    const swatch = page.querySelector<HTMLElement>(
+      `[data-user-preset="${id}"] .bp-preset-swatch`
+    );
+    if (!swatch) continue;
+    swatch.setAttribute('data-has-image', '1');
+    swatch.style.backgroundImage = `url(${JSON.stringify(entry.theme.backgroundImage)})`;
   }
 
-  // Draft palette holds in-flight edits without touching storage. The keys we
-  // edit through this UI; backgroundImage / backgroundMode are managed below.
-  const draft: CustomTheme = {
-    background: custom.background,
-    nav: custom.nav,
-    text: custom.text,
-    accent: custom.accent,
-  };
-  const initialSnapshot = JSON.stringify(draft);
-  const actionsEl = page.querySelector<HTMLElement>('[data-palette-actions]');
+  // ── Draft state ────────────────────────────────────────────────────────
+  // The draft mirrors every editable field. Apply commits it to either the
+  // active user preset (Overwrite) or a new one (New). Cancel/Discard reverts.
+  const draft: CustomTheme = { ...custom };
+  // Mutable so instant image commits can rebaseline the "dirty" comparison
+  // for the backgroundImage field while leaving palette dirtiness intact.
+  let initialSnapshot = JSON.stringify(draft);
+  const draftBar = page.querySelector<HTMLElement>('[data-draft-bar]');
 
   const markDirty = () => {
     const dirty = JSON.stringify(draft) !== initialSnapshot;
-    actionsEl?.classList.toggle('bp-dirty', dirty);
+    draftBar?.classList.toggle('bp-dirty', dirty);
     if (dirty) {
-      // Compose draft with current backgroundImage so preview keeps the image.
-      setPreviewTheme({ ...custom, ...draft });
+      setPreviewTheme(draft);
+      setBackgroundImagePreview(draft);
     } else {
       setPreviewTheme(null);
+      setBackgroundImagePreview(null);
     }
   };
 
-  // Color inputs (both <input type=color> and <input type=text> linked).
+  // Preset selection (click on a tile that isn't a tool button).
+  for (const el of page.querySelectorAll<HTMLElement>('[data-preset]')) {
+    el.addEventListener('click', async (e) => {
+      if ((e.target as HTMLElement).closest('[data-tool]')) return; // handled below
+      const dirty = JSON.stringify(draft) !== initialSnapshot;
+      if (dirty) {
+        const ok = await openConfirmModal({
+          title: 'Discard unsaved changes?',
+          body: 'You have unsaved theme edits. Switching presets will discard them.',
+          confirmLabel: 'Discard and switch',
+        });
+        if (!ok) return;
+      }
+      setPreviewTheme(null);
+      setBackgroundImagePreview(null);
+      const id = el.dataset.preset!;
+      await setSettings(activationPatch(id));
+      setStatus(schedule.enabled ? `Updated current schedule slot: ${id}` : `Active theme: ${id}`);
+      await render(page);
+    });
+  }
+
+  // "+ New preset" tile — creates an empty user preset and activates it.
+  // Mirrors the dirty-draft guard from preset selection so we don't silently
+  // throw away unsaved edits.
+  page.querySelector('[data-action="new-preset"]')?.addEventListener('click', async () => {
+    const dirty = JSON.stringify(draft) !== initialSnapshot;
+    if (dirty) {
+      const ok = await openConfirmModal({
+        title: 'Discard unsaved changes?',
+        body: 'You have unsaved theme edits. Creating a new preset will discard them.',
+        confirmLabel: 'Discard and create',
+      });
+      if (!ok) return;
+    }
+    const suggestion = suggestNextUserTheme(userThemes);
+    const name = await openNameModal({
+      title: 'Name your new theme',
+      defaultValue: suggestion.name,
+      confirmLabel: 'Create',
+    });
+    if (name == null) return;
+    setPreviewTheme(null);
+    setBackgroundImagePreview(null);
+    const created = await createUserTheme(name, {});
+    await setSettings(activationPatch(created.id));
+    setStatus(`Created "${created.name}".`);
+    await render(page);
+  });
+
+  // User-preset Rename / Delete.
+  for (const btn of page.querySelectorAll<HTMLButtonElement>('[data-tool]')) {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const tool = btn.dataset.tool!;
+      const id = btn.dataset.id!;
+      const entry = userThemes.entries[id];
+      if (!entry) return;
+      if (tool === 'rename') {
+        const next = await openNameModal({
+          title: 'Rename preset',
+          defaultValue: entry.name,
+          confirmLabel: 'Save',
+        });
+        if (next == null) return;
+        await renameUserTheme(id, next);
+        await render(page);
+      } else if (tool === 'delete') {
+        const ok = await openConfirmModal({
+          title: 'Delete preset',
+          body: `Delete "${entry.name}"? This can't be undone.`,
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!ok) return;
+        await deleteUserTheme(id);
+        await render(page);
+      }
+    });
+  }
+
+  // Color inputs.
   for (const row of page.querySelectorAll<HTMLElement>('.bp-color-row')) {
     const key = row.dataset.key as keyof CustomTheme;
-    // data-mirror-to lets a single row drive two palette vars at once — used
-    // for the merged "Text" control which writes both text and accent.
     const mirror = row.dataset.mirrorTo as keyof CustomTheme | undefined;
     const colorEl = row.querySelector<HTMLInputElement>('[data-color-input]')!;
     const textEl = row.querySelector<HTMLInputElement>('[data-color-text]')!;
@@ -396,35 +709,26 @@ async function render(page: HTMLElement): Promise<void> {
     });
   }
 
-  // Apply / Cancel for the palette draft.
-  page.querySelector('[data-action="palette-apply"]')?.addEventListener('click', async () => {
-    await setCustomTheme(draft);
-    if ((await getSettings()).themeId !== 'custom') {
-      await setSettings({ themeId: 'custom' });
+  // Reset palette (clears just the color fields in the draft).
+  page.querySelector('[data-action="reset-palette"]')?.addEventListener('click', () => {
+    draft.background = undefined;
+    draft.nav = undefined;
+    draft.text = undefined;
+    draft.accent = undefined;
+    for (const row of page.querySelectorAll<HTMLElement>('.bp-color-row')) {
+      const colorEl = row.querySelector<HTMLInputElement>('[data-color-input]');
+      const textEl = row.querySelector<HTMLInputElement>('[data-color-text]');
+      if (textEl) textEl.value = '';
+      if (colorEl) colorEl.value = colorEl.defaultValue;
     }
-    setPreviewTheme(null); // Storage listener now drives the canonical style.
-    setStatus('Palette applied.');
-    await render(page);
-  });
-  page.querySelector('[data-action="palette-cancel"]')?.addEventListener('click', async () => {
-    setPreviewTheme(null);
-    setStatus('Changes discarded.');
-    await render(page);
+    markDirty();
+    setStatus('Palette cleared — Apply to save.');
   });
 
-  page.querySelector('[data-action="reset-palette"]')?.addEventListener('click', async () => {
-    setPreviewTheme(null);
-    await clearCustomTheme();
-    setStatus('Custom palette cleared.');
-    await render(page);
-  });
-  page.querySelector('[data-action="remove-bg"]')?.addEventListener('click', async () => {
-    await removeCustomThemeBackground();
-    setStatus('Background image removed.');
-    await render(page);
-  });
-
-  // File upload.
+  // Background image upload — commits to the active preset instantly.
+  // On a built-in (which can't be overwritten) we have to land somewhere, so
+  // fall back to a name prompt and create a new preset that carries both the
+  // image and the in-progress palette draft.
   const fileEl = page.querySelector<HTMLInputElement>('[data-bg-file]');
   fileEl?.addEventListener('change', async () => {
     const f = fileEl.files?.[0];
@@ -435,36 +739,175 @@ async function render(page: HTMLElement): Promise<void> {
     }
     setStatus('Reading image…');
     const dataUrl = await fileToDataUrl(f);
-    await setCustomThemeBackground(dataUrl);
-    if ((await getSettings()).themeId !== 'custom') await setSettings({ themeId: 'custom' });
-    setStatus(`Image loaded (${formatBytes(f.size)}). Active theme set to Custom.`);
+
+    if (activeEntry) {
+      await setCustomThemeBackground(dataUrl);
+      draft.backgroundImage = dataUrl;
+      custom.backgroundImage = dataUrl;
+      // Keep the image field out of "dirty" — palette dirtiness is preserved.
+      initialSnapshot = JSON.stringify({ ...JSON.parse(initialSnapshot), backgroundImage: dataUrl });
+      const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
+      if (preview) {
+        preview.style.backgroundImage = `url(${JSON.stringify(dataUrl)})`;
+        preview.textContent = '';
+      }
+      page.querySelector<HTMLButtonElement>('[data-action="remove-bg"]')?.removeAttribute('disabled');
+      const swatch = page.querySelector<HTMLElement>(
+        `[data-user-preset="${activeEntry.id}"] .bp-preset-swatch`
+      );
+      if (swatch) {
+        swatch.setAttribute('data-has-image', '1');
+        swatch.style.backgroundImage = `url(${JSON.stringify(dataUrl)})`;
+      }
+      markDirty();
+      setStatus(`Image saved to "${activeEntry.name}".`);
+      return;
+    }
+
+    // Built-in active — needs a target preset.
+    const suggestion = suggestNextUserTheme(userThemes);
+    const name = await openNameModal({
+      title: 'Name your new theme',
+      defaultValue: suggestion.name,
+      confirmLabel: 'Create',
+    });
+    if (name == null) {
+      setStatus('');
+      fileEl.value = '';
+      return;
+    }
+    const created = await createUserTheme(name, { ...draft, backgroundImage: dataUrl });
+    await setSettings(activationPatch(created.id));
+    setPreviewTheme(null);
+    setBackgroundImagePreview(null);
+    setStatus(`Saved as "${created.name}".`);
     await render(page);
   });
 
-  // Brightness slider — apply the filter directly to the overlay div while
-  // dragging (cheap, no storage round-trip, no CSS rebuild). Commit to
-  // chrome.storage only on `change` (mouse release / arrow keys), which is
-  // what makes the value survive a reload.
+  // Background image remove — instant commit to the active preset. Built-ins
+  // never have an image to remove, so the button is disabled in that case
+  // (see the `disabled` attribute in the markup above).
+  page.querySelector('[data-action="remove-bg"]')?.addEventListener('click', async () => {
+    if (!activeEntry) return;
+    await removeCustomThemeBackground();
+    draft.backgroundImage = undefined;
+    custom.backgroundImage = undefined;
+    initialSnapshot = JSON.stringify({ ...JSON.parse(initialSnapshot), backgroundImage: undefined });
+    const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
+    if (preview) {
+      preview.style.backgroundImage = '';
+      preview.textContent = 'No background image set';
+    }
+    page.querySelector<HTMLButtonElement>('[data-action="remove-bg"]')?.setAttribute('disabled', 'true');
+    const swatch = page.querySelector<HTMLElement>(
+      `[data-user-preset="${activeEntry.id}"] .bp-preset-swatch`
+    );
+    if (swatch) {
+      swatch.removeAttribute('data-has-image');
+      swatch.style.backgroundImage = '';
+    }
+    markDirty();
+    setStatus(`Image removed from "${activeEntry.name}".`);
+  });
+
+  // Brightness — preview live while dragging, commit on Apply.
   const brightnessEl = page.querySelector<HTMLInputElement>('[data-bg-brightness]');
   const brightnessReadout = page.querySelector<HTMLElement>('[data-bg-brightness-readout]');
   brightnessEl?.addEventListener('input', () => {
     const v = clampBrightnessForUI(Number(brightnessEl.value));
     if (brightnessReadout) brightnessReadout.textContent = `${v}%`;
     setBackgroundBrightnessPreview(v);
-  });
-  brightnessEl?.addEventListener('change', () => {
-    const v = clampBrightnessForUI(Number(brightnessEl.value));
-    void setCustomTheme({ backgroundBrightness: v });
+    draft.backgroundBrightness = v;
+    markDirty();
   });
 
   // Layout mode.
-  page
-    .querySelector<HTMLSelectElement>('[data-bg-mode]')
-    ?.addEventListener('change', async (e) => {
-      const mode = (e.target as HTMLSelectElement).value as 'cover' | 'contain' | 'tile';
-      await setCustomTheme({ backgroundMode: mode });
-      setStatus(`Layout: ${mode}`);
+  page.querySelector<HTMLSelectElement>('[data-bg-mode]')?.addEventListener('change', (e) => {
+    const mode = (e.target as HTMLSelectElement).value as 'cover' | 'contain' | 'tile';
+    draft.backgroundMode = mode;
+    markDirty();
+  });
+
+  page.querySelector<HTMLInputElement>('[data-schedule-enabled]')?.addEventListener('change', async (e) => {
+    const enabled = (e.target as HTMLInputElement).checked;
+    const nextSchedule = { ...schedule, enabled };
+    const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
+    await setSettings({
+      themeSchedule: nextSchedule,
+      ...(enabled && resolution ? { themeId: resolution.themeId } : {}),
     });
+    await render(page);
+  });
+
+  for (const select of page.querySelectorAll<HTMLSelectElement>('[data-schedule-theme]')) {
+    select.addEventListener('change', async () => {
+      const key = select.dataset.scheduleTheme as 'lightThemeId' | 'darkThemeId';
+      const nextSchedule = { ...schedule, [key]: select.value };
+      const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
+      await setSettings({
+        themeSchedule: nextSchedule,
+        ...(nextSchedule.enabled && resolution ? { themeId: resolution.themeId } : {}),
+      });
+      await render(page);
+    });
+  }
+
+  for (const input of page.querySelectorAll<HTMLInputElement>('[data-schedule-time]')) {
+    input.addEventListener('change', async () => {
+      const key = input.dataset.scheduleTime as 'lightStartsAt' | 'darkStartsAt';
+      const nextSchedule = { ...schedule, [key]: input.value || schedule[key] };
+      const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
+      await setSettings({
+        themeSchedule: nextSchedule,
+        ...(nextSchedule.enabled && resolution ? { themeId: resolution.themeId } : {}),
+      });
+      await render(page);
+    });
+  }
+
+  // ── Apply / Discard ────────────────────────────────────────────────────
+
+  page.querySelector('[data-action="discard"]')?.addEventListener('click', async () => {
+    setPreviewTheme(null);
+    setBackgroundImagePreview(null);
+    setStatus('Changes discarded.');
+    await render(page);
+  });
+
+  page.querySelector('[data-action="apply"]')?.addEventListener('click', async () => {
+    // On a user preset → overwrite in place. On a built-in (which can't be
+    // overwritten) → fall through to a name prompt so the user lands on a new
+    // user preset rather than getting nothing.
+    if (activeEntry) {
+      await overwriteUserTheme(activeEntry.id, draft);
+      setPreviewTheme(null);
+      setBackgroundImagePreview(null);
+      setStatus(`Saved to "${activeEntry.name}".`);
+      await render(page);
+      return;
+    }
+    const suggestion = suggestNextUserTheme(userThemes);
+    const name = await openNameModal({
+      title: 'Name your new theme',
+      defaultValue: suggestion.name,
+      confirmLabel: 'Create',
+    });
+    if (name == null) return;
+    const created = await createUserTheme(name, draft);
+    await setSettings(activationPatch(created.id));
+    setPreviewTheme(null);
+    setBackgroundImagePreview(null);
+    setStatus(`Saved as "${created.name}".`);
+    await render(page);
+  });
+
+  // If we were called via re-render mid-edit, restore the dirty bar state.
+  markDirty();
+
+  // `clearCustomTheme` is exported from themeStore but isn't called here
+  // anymore — kept around in case the legacy "Reset palette" entry-point
+  // wants a hard wipe; reference it so unused-imports doesn't trip.
+  void clearCustomTheme;
 }
 
 function fileToDataUrl(f: File): Promise<string> {
@@ -488,7 +931,6 @@ function clampBrightnessForUI(v: number | undefined): number {
 }
 
 function normalizeColor(v: string): string {
-  // Returns a hex (#RRGGBB) the <input type="color"> can accept, or '' if not parseable.
   const t = v.trim();
   if (/^#[0-9a-f]{6}$/i.test(t)) return t;
   if (/^#[0-9a-f]{3}$/i.test(t)) {
@@ -513,6 +955,7 @@ async function runAsync(host: HTMLElement): Promise<void> {
       page.remove();
       restoreHomeContent();
       setPreviewTheme(null);
+      setBackgroundImagePreview(null);
     }
     return;
   }

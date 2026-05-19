@@ -14,7 +14,9 @@
  * The overlay replaces #content with a SviBlox-rendered profile.
  */
 
-import { getRobloxUser, getCombinedNames, RobloxUser } from '@/api/users';
+import { getRobloxUser, getCombinedNames, CombinedNamesEntry, RobloxUser } from '@/api/users';
+import { getSettings } from '@/storage/settingsStore';
+import { ensureAnnotationsPrimed, getNickname } from '@/storage/profileAnnotations';
 import {
   getUserAvatarHeadshots,
   getGroupIcons,
@@ -23,8 +25,16 @@ import {
   getBadgeIcons,
 } from '@/api/thumbnails';
 import { robloxFetch } from '@/api/robloxClient';
-import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
+import { getAllFavoriteGames, FavoriteGame } from '@/api/favorites';
 import { getGameInfo } from '@/api/games';
+import { getAllUserBadges } from '@/api/badges';
+import { getMyFriends } from '@/api/friends';
+import {
+  getCollectiblesValue,
+  getAvatarItemsValue,
+  CollectiblesValue,
+  AvatarItemsValue,
+} from '@/api/accountValue';
 
 const STYLE_ID = 'bloxplus-banned-profile-style';
 const ROOT_ID = 'bloxplus-banned-profile';
@@ -197,6 +207,11 @@ async function maybeRender(userId: number): Promise<void> {
 async function render(user: RobloxUser): Promise<void> {
   ensureStyle();
 
+  // Prime profile annotations + read the toggle so the header can append the
+  // private nickname (if any) right next to the displayName.
+  const settings = await getSettings();
+  if (settings.showProfileNotes) await ensureAnnotationsPrimed();
+
   // Wait for #content to mount; Roblox renders it as part of the SPA shell.
   const content = await waitFor<HTMLElement>(() => document.getElementById('content'));
   if (!content) return;
@@ -210,7 +225,7 @@ async function render(user: RobloxUser): Promise<void> {
   root.dataset.bpUserId = String(user.id);
   content.appendChild(root);
 
-  root.appendChild(buildHeader(user));
+  root.appendChild(buildHeader(user, Boolean(settings.showProfileNotes)));
   const tabsBar = buildTabsBar();
   root.appendChild(tabsBar);
 
@@ -230,6 +245,7 @@ async function render(user: RobloxUser): Promise<void> {
   const friendsHost = section(aboutPane, 'Friends');
   const groupsHost = section(aboutPane, 'Communities');
   const badgesHost = section(aboutPane, 'Badges');
+  const accountValueHost = section(aboutPane, 'Account value');
   const creationsHost = section(creationsPane, 'Experiences');
 
   // Fan out the data loads. Each is independent and self-hides on empty.
@@ -240,12 +256,13 @@ async function render(user: RobloxUser): Promise<void> {
   void loadFriends(user.id, friendsHost);
   void loadGroups(user.id, groupsHost);
   void loadBadges(user.id, badgesHost);
+  void loadAccountValue(user.id, accountValueHost, Boolean(settings.showAccountValue));
   void loadCreations(user.id, creationsHost);
 }
 
 // ---------- Header ----------
 
-function buildHeader(user: RobloxUser): HTMLElement {
+function buildHeader(user: RobloxUser, showNickname: boolean): HTMLElement {
   const header = el('div', { class: 'bp-banned-header' });
 
   const avatarBox = el('div', { class: 'bp-banned-avatar', id: 'bp-banned-avatar' });
@@ -255,6 +272,10 @@ function buildHeader(user: RobloxUser): HTMLElement {
   const meta = el('div', { class: 'bp-banned-meta' });
   const nameRow = el('div', { class: 'bp-banned-name-row' });
   nameRow.appendChild(text('h1', user.displayName, 'bp-banned-display-name'));
+  const nickname = showNickname ? getNickname(user.id) : null;
+  if (nickname) {
+    nameRow.appendChild(text('span', `(${nickname})`, 'bp-banned-nickname'));
+  }
   if (user.hasVerifiedBadge) nameRow.appendChild(verifiedBadge());
   nameRow.appendChild(bannedBadge());
   meta.appendChild(nameRow);
@@ -445,37 +466,70 @@ async function loadCurrentlyWearing(userId: number, host: HTMLElement): Promise<
   revealSection(host);
 }
 
+const FAVORITES_VISIBLE = 6;
+
 async function loadFavorites(userId: number, host: HTMLElement): Promise<void> {
   let games: FavoriteGame[];
   try {
-    games = (await getFavoriteGames(userId, 10)).slice(0, 6);
+    games = await getAllFavoriteGames(userId);
   } catch {
     return;
   }
   if (!games.length) return;
-  const universeIds = games.map((g) => g.id);
+
+  const initial = games.slice(0, FAVORITES_VISIBLE);
+  const initialIds = initial.map((g) => g.id);
   const [icons, info] = await Promise.all([
-    getGameIcons(universeIds),
-    getGameInfo(universeIds).catch(() => new Map()),
+    getGameIcons(initialIds),
+    getGameInfo(initialIds).catch(() => new Map()),
   ]);
+
   const carousel = el('div', { class: 'bp-carousel' });
-  for (const g of games) {
-    const card = el('a', {
-      class: 'bp-game-card',
-      href: g.rootPlace?.id ? `/games/${g.rootPlace.id}/-` : `/games/?GameID=${g.id}`,
-    });
-    card.appendChild(thumbImg(icons.get(g.id), 'game'));
-    const meta = el('div', { class: 'bp-game-meta' });
-    meta.appendChild(text('div', g.name, 'bp-game-name'));
-    const playing = info.get(g.id)?.playing;
-    if (typeof playing === 'number') {
-      meta.appendChild(text('div', `${formatCount(playing)} active`, 'bp-game-sub'));
-    }
-    card.appendChild(meta);
-    carousel.appendChild(card);
+  for (const g of initial) {
+    carousel.appendChild(renderFavoriteCard(g, icons.get(g.id), info.get(g.id)?.playing));
   }
   host.appendChild(carousel);
+
+  if (games.length > FAVORITES_VISIBLE) {
+    const more = el('button', { type: 'button', class: 'bp-show-all-btn' });
+    more.textContent = `Show all ${formatCount(games.length)} favorites →`;
+    more.addEventListener('click', async () => {
+      (more as HTMLButtonElement).disabled = true;
+      more.textContent = 'Loading…';
+      const allIds = games.map((g) => g.id);
+      const [allIcons, allInfo] = await Promise.all([
+        getGameIcons(allIds),
+        getGameInfo(allIds).catch(() => new Map()),
+      ]);
+      const grid = el('div', { class: 'bp-grid' });
+      for (const g of games) {
+        grid.appendChild(renderFavoriteCard(g, allIcons.get(g.id), allInfo.get(g.id)?.playing));
+      }
+      carousel.replaceWith(grid);
+      more.remove();
+    });
+    host.appendChild(more);
+  }
   revealSection(host);
+}
+
+function renderFavoriteCard(
+  g: FavoriteGame,
+  icon: string | undefined,
+  playing: number | undefined
+): HTMLElement {
+  const card = el('a', {
+    class: 'bp-game-card',
+    href: g.rootPlace?.id ? `/games/${g.rootPlace.id}/-` : `/games/?GameID=${g.id}`,
+  });
+  card.appendChild(thumbImg(icon, 'game'));
+  const meta = el('div', { class: 'bp-game-meta' });
+  meta.appendChild(text('div', g.name, 'bp-game-name'));
+  if (typeof playing === 'number') {
+    meta.appendChild(text('div', `${formatCount(playing)} active`, 'bp-game-sub'));
+  }
+  card.appendChild(meta);
+  return card;
 }
 
 interface FriendItem {
@@ -484,36 +538,67 @@ interface FriendItem {
   displayName?: string;
 }
 
+const FRIENDS_VISIBLE = 18;
+
 async function loadFriends(userId: number, host: HTMLElement): Promise<void> {
   let items: FriendItem[];
   try {
-    const r = await robloxFetch<{ PageItems?: FriendItem[] }>(
-      `https://friends.roblox.com/v1/users/${userId}/friends/find?userSort=2&limit=18`,
-      { cacheTtlMs: 5 * 60_000, retries: 1 }
-    );
-    items = (r.PageItems ?? []).filter((f) => f.id > 0);
+    // `/v1/users/{id}/friends` returns the full friend list in a single
+    // call (no pagination), unlike `/friends/find` which we used before.
+    items = (await getMyFriends(userId)).filter((f) => f.id > 0);
   } catch {
     return;
   }
   if (!items.length) return;
-  const ids = items.map((f) => f.id);
+
+  const initial = items.slice(0, FRIENDS_VISIBLE);
+  const initialIds = initial.map((f) => f.id);
   const [headshots, names] = await Promise.all([
-    getUserAvatarHeadshots(ids),
-    getCombinedNames(ids),
+    getUserAvatarHeadshots(initialIds),
+    getCombinedNames(initialIds),
   ]);
+
   const carousel = el('div', { class: 'bp-carousel' });
-  for (const f of items) {
-    const profile = names.get(f.id);
-    const display = profile?.names?.combinedName ?? f.displayName ?? f.name ?? `User ${f.id}`;
-    const username = profile?.names?.username ?? f.name ?? '';
-    const tile = el('a', { class: 'bp-friend-tile', href: `/users/${f.id}/profile` });
-    tile.appendChild(thumbImg(headshots.get(f.id), 'avatar'));
-    tile.appendChild(text('div', display, 'bp-friend-display'));
-    if (username) tile.appendChild(text('div', `@${username}`, 'bp-friend-username'));
-    carousel.appendChild(tile);
+  for (const f of initial) {
+    carousel.appendChild(renderFriendTile(f, headshots.get(f.id), names.get(f.id)));
   }
   host.appendChild(carousel);
+
+  if (items.length > FRIENDS_VISIBLE) {
+    const more = el('button', { type: 'button', class: 'bp-show-all-btn' });
+    more.textContent = `Show all ${formatCount(items.length)} friends →`;
+    more.addEventListener('click', async () => {
+      (more as HTMLButtonElement).disabled = true;
+      more.textContent = 'Loading…';
+      const allIds = items.map((f) => f.id);
+      const [allHeadshots, allNames] = await Promise.all([
+        getUserAvatarHeadshots(allIds),
+        getCombinedNames(allIds),
+      ]);
+      const grid = el('div', { class: 'bp-grid' });
+      for (const f of items) {
+        grid.appendChild(renderFriendTile(f, allHeadshots.get(f.id), allNames.get(f.id)));
+      }
+      carousel.replaceWith(grid);
+      more.remove();
+    });
+    host.appendChild(more);
+  }
   revealSection(host);
+}
+
+function renderFriendTile(
+  f: FriendItem,
+  headshot: string | undefined,
+  profile: CombinedNamesEntry | undefined
+): HTMLElement {
+  const display = profile?.names?.combinedName ?? f.displayName ?? f.name ?? `User ${f.id}`;
+  const username = profile?.names?.username ?? f.name ?? '';
+  const tile = el('a', { class: 'bp-friend-tile', href: `/users/${f.id}/profile` });
+  tile.appendChild(thumbImg(headshot, 'avatar'));
+  tile.appendChild(text('div', display, 'bp-friend-display'));
+  if (username) tile.appendChild(text('div', `@${username}`, 'bp-friend-username'));
+  return tile;
 }
 
 interface GroupRow {
@@ -556,28 +641,147 @@ interface BadgeRow {
   name: string;
 }
 
+const BADGES_VISIBLE = 8;
+
 async function loadBadges(userId: number, host: HTMLElement): Promise<void> {
   let rows: BadgeRow[];
   try {
-    const r = await robloxFetch<{ data?: BadgeRow[] }>(
-      `https://badges.roblox.com/v1/users/${userId}/badges?limit=10&sortOrder=Desc`,
-      { cacheTtlMs: 5 * 60_000, retries: 1 }
-    );
-    rows = (r.data ?? []).slice(0, 8);
+    rows = (await getAllUserBadges(userId)) as BadgeRow[];
   } catch {
     return;
   }
   if (!rows.length) return;
-  const icons = await getBadgeIcons(rows.map((b) => b.id));
+
+  const initial = rows.slice(0, BADGES_VISIBLE);
+  const initialIcons = await getBadgeIcons(initial.map((b) => b.id));
+
   const carousel = el('div', { class: 'bp-carousel' });
-  for (const b of rows) {
-    const card = el('a', { class: 'bp-badge-card', href: `/badges/${b.id}/-` });
-    card.appendChild(thumbImg(icons.get(b.id), 'badge'));
-    card.appendChild(text('div', b.name, 'bp-badge-name'));
-    carousel.appendChild(card);
+  for (const b of initial) {
+    carousel.appendChild(renderBadgeCard(b, initialIcons.get(b.id)));
   }
   host.appendChild(carousel);
+
+  if (rows.length > BADGES_VISIBLE) {
+    const more = el('button', { type: 'button', class: 'bp-show-all-btn' });
+    more.textContent = `Show all ${formatCount(rows.length)} badges →`;
+    more.addEventListener('click', async () => {
+      (more as HTMLButtonElement).disabled = true;
+      more.textContent = 'Loading…';
+      const allIcons = await getBadgeIcons(rows.map((b) => b.id));
+      const grid = el('div', { class: 'bp-grid' });
+      for (const b of rows) {
+        grid.appendChild(renderBadgeCard(b, allIcons.get(b.id)));
+      }
+      carousel.replaceWith(grid);
+      more.remove();
+    });
+    host.appendChild(more);
+  }
   revealSection(host);
+}
+
+function renderBadgeCard(b: BadgeRow, icon: string | undefined): HTMLElement {
+  const card = el('a', { class: 'bp-badge-card', href: `/badges/${b.id}/-` });
+  card.appendChild(thumbImg(icon, 'badge'));
+  card.appendChild(text('div', b.name, 'bp-badge-name'));
+  return card;
+}
+
+/**
+ * Lazy "Calculate inventory value" entry. We don't fire the inventory walk
+ * automatically because the avatar-items pagination can run up to ~10
+ * sequential calls + a few catalog-details POSTs (~5-10s on a fat
+ * inventory) — most banned-profile views won't care, so we gate it behind
+ * an explicit click. Gated by the `showAccountValue` popup toggle.
+ */
+async function loadAccountValue(
+  userId: number,
+  host: HTMLElement,
+  enabled: boolean
+): Promise<void> {
+  if (!enabled) return;
+
+  const cta = el('button', { type: 'button', class: 'bp-account-value-cta' });
+  cta.textContent = 'Calculate inventory value →';
+  cta.title = 'Sums Limited RAP and current catalog prices of avatar items';
+  host.appendChild(cta);
+  revealSection(host);
+
+  cta.addEventListener('click', async () => {
+    (cta as HTMLButtonElement).disabled = true;
+    cta.textContent = 'Calculating…';
+    let collectibles: CollectiblesValue;
+    let avatarItems: AvatarItemsValue;
+    try {
+      [collectibles, avatarItems] = await Promise.all([
+        getCollectiblesValue(userId),
+        getAvatarItemsValue(userId),
+      ]);
+    } catch (e) {
+      cta.replaceWith(text('div', `Could not load value: ${(e as Error).message}`, 'bp-section-empty'));
+      return;
+    }
+
+    if (collectibles.privateInventory && avatarItems.privateInventory) {
+      cta.replaceWith(
+        text('div', "This account's inventory is private.", 'bp-section-empty')
+      );
+      return;
+    }
+
+    const total = collectibles.totalRap + avatarItems.totalRobux;
+    const card = el('div', { class: 'bp-account-value-card-banned' });
+    card.appendChild(metricCard('Known total', robux(total), 'Limited RAP + avatar item prices'));
+    card.appendChild(
+      metricCard(
+        'Limited RAP',
+        robux(collectibles.totalRap),
+        `${formatExact(collectibles.valuedCollectibleCount)} valued limiteds`
+      )
+    );
+    card.appendChild(
+      metricCard('Collectibles', formatExact(collectibles.collectibleCount), 'Limited inventory rows')
+    );
+    card.appendChild(
+      metricCard(
+        'Avatar items',
+        robux(avatarItems.totalRobux),
+        avatarItems.privateInventory
+          ? 'Inventory private'
+          : `${formatExact(avatarItems.valuedItemCount)} of ${formatExact(avatarItems.itemCount)} priced`
+      )
+    );
+
+    const caveats: string[] = [];
+    if (collectibles.truncated) {
+      caveats.push(`Scanned ${formatExact(collectibles.scannedPages * 100)}+ collectible rows; very large inventories may be partial.`);
+    }
+    if (avatarItems.truncated) {
+      caveats.push(`Capped at ${formatExact(avatarItems.scannedPages * 100)} avatar items.`);
+    }
+
+    cta.replaceWith(card);
+    if (caveats.length) {
+      const note = text('div', caveats.join(' '), 'bp-account-value-note');
+      host.appendChild(note);
+    }
+  });
+}
+
+function metricCard(label: string, value: string, detail: string): HTMLElement {
+  const wrap = el('div', { class: 'bp-account-value-metric' });
+  wrap.appendChild(text('span', label, 'bp-account-value-metric-label'));
+  wrap.appendChild(text('strong', value, 'bp-account-value-metric-value'));
+  wrap.appendChild(text('small', detail, 'bp-account-value-metric-detail'));
+  return wrap;
+}
+
+function robux(n: number): string {
+  return `R$ ${formatExact(Math.round(n))}`;
+}
+
+function formatExact(n: number): string {
+  return new Intl.NumberFormat().format(n);
 }
 
 interface CreationRow {
@@ -713,6 +917,14 @@ function ensureStyle(): void {
     .bp-banned-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
     .bp-banned-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .bp-banned-display-name { font: 700 28px/1.1 inherit; margin: 0; }
+    .bp-banned-nickname {
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: rgba(116, 64, 234, 0.18);
+      border: 1px solid rgba(116, 64, 234, 0.55);
+      color: #c5b3ff;
+      font: 600 13px/1.2 inherit;
+    }
     .bp-banned-username { color: rgba(255,255,255,0.7); font-size: 14px; }
     .bp-banned-badge {
       display: inline-block;
@@ -799,7 +1011,87 @@ function ensureStyle(): void {
       padding: 4px;
       border-radius: 8px;
     }
-    .bp-grid .bp-tile, .bp-grid .bp-game-card { width: auto; }
+    .bp-grid .bp-tile, .bp-grid .bp-game-card, .bp-grid .bp-badge-card,
+    .bp-grid .bp-group-card, .bp-grid .bp-friend-tile { width: auto; }
+    .bp-show-all-btn {
+      display: block;
+      margin-top: 10px;
+      padding: 8px 14px;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.05);
+      color: inherit;
+      font: 600 13px/1 inherit;
+      cursor: pointer;
+    }
+    .bp-show-all-btn:hover:not(:disabled) {
+      background: rgba(255,255,255,0.10);
+      border-color: rgba(255,255,255,0.30);
+    }
+    .bp-section-empty {
+      padding: 8px 0;
+      font-size: 13px;
+      color: rgba(255,255,255,0.55);
+    }
+    .bp-account-value-cta {
+      display: inline-block;
+      padding: 8px 14px;
+      border: 1px solid rgba(116, 64, 234, 0.55);
+      border-radius: 6px;
+      background: rgba(116, 64, 234, 0.18);
+      color: #c5b3ff;
+      font: 600 13px/1 inherit;
+      cursor: pointer;
+    }
+    .bp-account-value-cta:hover:not(:disabled) {
+      background: rgba(116, 64, 234, 0.28);
+      border-color: rgba(116, 64, 234, 0.75);
+    }
+    .bp-account-value-cta:disabled {
+      opacity: 0.65;
+      cursor: progress;
+    }
+    .bp-account-value-card-banned {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .bp-account-value-metric {
+      min-width: 0;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .bp-account-value-metric-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      color: rgba(255,255,255,0.62);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .bp-account-value-metric-value {
+      display: block;
+      margin: 3px 0;
+      font-size: 18px;
+      color: #fff;
+      overflow-wrap: anywhere;
+    }
+    .bp-account-value-metric-detail {
+      display: block;
+      font-size: 11px;
+      color: rgba(255,255,255,0.58);
+    }
+    .bp-account-value-note {
+      margin-top: 8px;
+      font-size: 11px;
+      color: rgba(255,255,255,0.55);
+    }
+    .bp-show-all-btn:disabled {
+      opacity: 0.65;
+      cursor: progress;
+    }
     .bp-tile:hover, .bp-friend-tile:hover, .bp-game-card:hover, .bp-group-card:hover, .bp-badge-card:hover {
       background: rgba(255,255,255,0.06);
     }

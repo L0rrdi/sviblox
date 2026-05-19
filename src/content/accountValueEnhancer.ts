@@ -1,8 +1,10 @@
 import {
   getCollectiblesValue,
   getOwnPurchaseValue,
+  getAvatarItemsValue,
   CollectiblesValue,
   OwnPurchaseValue,
+  AvatarItemsValue,
 } from '@/api/accountValue';
 import { getAuthenticatedUserId } from '@/api/users';
 import { getSettings } from '@/storage/settingsStore';
@@ -55,11 +57,12 @@ async function loadValue(root: HTMLElement, userId: number): Promise<void> {
   try {
     const me = await getAuthenticatedUserId();
     const isOwnProfile = me === userId;
-    const [collectibles, purchases] = await Promise.all([
+    const [collectibles, purchases, avatarItems] = await Promise.all([
       getCollectiblesValue(userId),
       isOwnProfile ? getOwnPurchaseValue(userId) : Promise.resolve(null),
+      getAvatarItemsValue(userId),
     ]);
-    renderValue(root, userId, collectibles, purchases, isOwnProfile);
+    renderValue(root, userId, collectibles, purchases, avatarItems, isOwnProfile);
     loadedForUser = userId;
     loadedForPath = location.pathname;
   } catch (e) {
@@ -140,9 +143,10 @@ function renderValue(
   userId: number,
   collectibles: CollectiblesValue,
   purchases: OwnPurchaseValue | null,
+  avatarItems: AvatarItemsValue,
   isOwnProfile: boolean
 ): void {
-  if (collectibles.privateInventory) {
+  if (collectibles.privateInventory && avatarItems.privateInventory) {
     renderFrame(
       root,
       userId,
@@ -153,11 +157,24 @@ function renderValue(
     return;
   }
 
-  const knownTotal = collectibles.totalRap + (purchases?.totalRobuxSpent ?? 0);
+  const knownTotal =
+    collectibles.totalRap + (purchases?.totalRobuxSpent ?? 0) + avatarItems.totalRobux;
+  const totalBreakdown = ['Limited RAP'];
+  if (purchases) totalBreakdown.push('purchase spend');
+  if (avatarItems.totalRobux > 0) totalBreakdown.push('avatar item prices');
+  const totalDetail = totalBreakdown.join(' + ');
+
   const rows = [
-    metric('Known total', robux(knownTotal), 'Limited RAP' + (purchases ? ' + purchase spend' : '')),
+    metric('Known total', robux(knownTotal), totalDetail),
     metric('Limited RAP', robux(collectibles.totalRap), `${collectibles.valuedCollectibleCount} valued limiteds`),
     metric('Collectibles', formatNumber(collectibles.collectibleCount), 'Limited and collectible inventory rows'),
+    metric(
+      'Avatar items',
+      robux(avatarItems.totalRobux),
+      avatarItems.privateInventory
+        ? 'Inventory private'
+        : `${formatNumber(avatarItems.valuedItemCount)} of ${formatNumber(avatarItems.itemCount)} priced`
+    ),
   ];
   if (purchases) {
     rows.push(metric('Robux spent', robux(purchases.totalRobuxSpent), `${purchases.purchaseCount} purchases scanned`));
@@ -179,18 +196,21 @@ function renderValue(
       </div>`
     : '';
 
-  const scopeText = isOwnProfile
-    ? 'Includes collectible RAP plus your authenticated purchase history. Ordinary non-limited inventory has no resale value here.'
-    : 'Only public collectible RAP is available for other profiles. Private inventory and purchase history are hidden by Roblox.';
-  const truncated = collectibles.truncated
+  const scopeBase = isOwnProfile
+    ? 'Limited RAP + current catalog prices of your avatar items + your authenticated purchase history. Some items appear in both purchase spend and avatar prices.'
+    : 'Limited RAP + current catalog prices of public avatar items. Purchase history is hidden by Roblox for other profiles.';
+  const collectibleTrunc = collectibles.truncated
     ? ` Scanned ${formatNumber(collectibles.scannedPages * 100)}+ collectible rows; very large inventories may be partial.`
+    : '';
+  const itemsTrunc = avatarItems.truncated
+    ? ` Capped at ${formatNumber(avatarItems.scannedPages * 100)} avatar items.`
     : '';
 
   renderFrame(
     root,
     userId,
     true,
-    scopeText + truncated,
+    scopeBase + collectibleTrunc + itemsTrunc,
     `
     <div class="bp-account-value-grid">${rows.join('')}</div>
     ${topItems}
