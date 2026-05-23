@@ -4,6 +4,11 @@ const SHEET_ID = '17HE0xTN5tuq8BAkwvtP17tlJW8rpFNI3WzbI4LYXchk';
 const SHEET_GID = '0';
 const CSV_URL =
   `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
+// Edit-view HTML carries cell hyperlinks (col E "Media" video links) that CSV /
+// gviz exports strip. Heavy (~500KB raw, ~50–80KB gzipped) but only refetched
+// every 6h via the same SWR cache as the CSV.
+const EDIT_URL =
+  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit?gid=${SHEET_GID}`;
 
 const STORAGE_KEY = 'bloxplus.uhbl.sheet';
 const FRESH_MS = 6 * 60 * 60_000;
@@ -63,8 +68,21 @@ function refreshInBackground(): Promise<void> {
 async function fetchAndStore(): Promise<UhblBadge[]> {
   if (inflight) return inflight;
   inflight = (async () => {
-    const csv = await fetchCsvViaServiceWorker();
+    // CSV is the authoritative list. The edit-view fetch is best-effort — if
+    // Google changes the bootstrap format we still show all badges, just
+    // without video buttons.
+    const [csv, editHtml] = await Promise.all([
+      fetchViaServiceWorker(CSV_URL),
+      fetchViaServiceWorker(EDIT_URL).catch(() => null),
+    ]);
     const badges = parseUhblCsv(csv);
+    if (editHtml) {
+      const videos = extractVideoUrls(editHtml);
+      for (const b of badges) {
+        const v = videos.get(b.badgeId);
+        if (v) b.videoUrl = v;
+      }
+    }
     const snapshot: SheetSnapshot = { fetchedAt: Date.now(), badges };
     await chrome.storage.local.set({ [STORAGE_KEY]: snapshot });
     return badges;
@@ -83,16 +101,107 @@ async function readSnapshot(): Promise<SheetSnapshot | null> {
   return v;
 }
 
-async function fetchCsvViaServiceWorker(): Promise<string> {
+async function fetchViaServiceWorker(url: string): Promise<string> {
   const resp = (await chrome.runtime.sendMessage({
     type: 'fetchUrl',
-    url: CSV_URL,
+    url,
     responseType: 'text',
   })) as FetchUrlResponse | undefined;
   if (!resp?.ok || typeof resp.data !== 'string') {
-    throw new Error(resp?.error || 'UHBL sheet fetch failed');
+    throw new Error(resp?.error || `UHBL fetch failed (${url})`);
   }
   return resp.data;
+}
+
+/**
+ * Extracts a {badgeId → mediaUrl} map from the Google Sheets edit-view HTML.
+ *
+ * Sheet hyperlinks are stored as cell-link annotations (FlatChange key "24")
+ * in the embedded `bootstrapData` JSON. Within the chunk, cell-links appear
+ * sequentially: each badge row contributes `badge_C` then optionally
+ * `video_E` then `badge_J`. Pairing rule: for each badge link, if the next
+ * link is non-Roblox, treat it as that badge's media URL. First occurrence
+ * per badge wins (so col C's link is paired, not col J's).
+ *
+ * If Google changes the bootstrap layout, this silently returns an empty
+ * map and the rest of the sheet still loads.
+ */
+export function extractVideoUrls(editHtml: string): Map<number, string> {
+  const out = new Map<number, string>();
+  const marker = 'var bootstrapData = ';
+  const start = editHtml.indexOf(marker);
+  if (start < 0) return out;
+  // Brace-walk the JSON literal so we don't depend on a trailing-token shape.
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  let end = -1;
+  for (let i = start + marker.length; i < editHtml.length; i++) {
+    const c = editHtml.charCodeAt(i);
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === 0x5c) esc = true; // backslash
+      else if (c === 0x22) inStr = false; // closing quote
+    } else if (c === 0x22) {
+      inStr = true;
+    } else if (c === 0x7b) {
+      depth++;
+    } else if (c === 0x7d) {
+      depth--;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end < 0) return out;
+  let data: unknown;
+  try {
+    data = JSON.parse(editHtml.slice(start + marker.length, end));
+  } catch {
+    return out;
+  }
+
+  // Concatenate every chunk string in the bootstrap. Different sheets nest
+  // chunks differently (firstchunk vs topsnapshot), but every chunk we care
+  // about is shaped as [revisionId, dataString].
+  const chunkStrings: string[] = [];
+  const stack: unknown[] = [data];
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      if (node.length === 2 && typeof node[0] === 'number' && typeof node[1] === 'string') {
+        chunkStrings.push(node[1]);
+        continue;
+      }
+      for (const x of node) stack.push(x);
+      continue;
+    }
+    for (const v of Object.values(node)) stack.push(v);
+  }
+  const total = chunkStrings.join('');
+  if (!total) return out;
+
+  // Walk all cell-link annotations in source order. `"24":"<url>"` is a
+  // hyperlink attached to a cell value.
+  const linkRe = /"24":"([^"]+)"/g;
+  const badgeRe = /^https?:\/\/(?:www\.)?roblox\.com\/badges\/(\d+)/;
+  const links: { isBadge: number | null; url: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = linkRe.exec(total))) {
+    const raw = m[1].replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+    const badgeMatch = raw.match(badgeRe);
+    links.push({ isBadge: badgeMatch ? Number(badgeMatch[1]) : null, url: raw });
+  }
+  for (let i = 0; i < links.length; i++) {
+    const cur = links[i];
+    if (cur.isBadge == null) continue;
+    if (out.has(cur.isBadge)) continue; // skip col J duplicate of col C
+    const next = links[i + 1];
+    if (next && next.isBadge == null) out.set(cur.isBadge, next.url);
+  }
+  return out;
 }
 
 /**

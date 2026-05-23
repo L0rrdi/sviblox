@@ -36,18 +36,17 @@ import {
   AvatarItemsValue,
 } from '@/api/accountValue';
 
+import { install as installBannedTrap, readRecentProfileNav } from './bannedProfileTrap';
+
 const STYLE_ID = 'bloxplus-banned-profile-style';
 const ROOT_ID = 'bloxplus-banned-profile';
-const SESSION_KEY = 'bp.lastProfileNav';
-const CLICK_FLAG = '__bpBannedClickInstalled';
 const OBSERVER_FLAG = '__bpBannedObserverInstalled';
-const STALE_MS = 30_000;
 
 let renderedForUserId: number | null = null;
 let inflight = false;
 
 export async function run(): Promise<void> {
-  installClickInterceptOnce();
+  installBannedTrap(); // idempotent; router also installs it as always-on.
   installFriendCardObserverOnce();
   repairDeletedFriendCards();
 
@@ -55,7 +54,6 @@ export async function run(): Promise<void> {
   if (directMatch) {
     const userId = Number(directMatch[1]);
     if (Number.isFinite(userId)) {
-      stashProfileNav(userId);
       await maybeRender(userId);
     }
     return;
@@ -127,46 +125,6 @@ function installFriendCardObserverOnce(): void {
     });
   });
   obs.observe(document.documentElement, { childList: true, subtree: true });
-}
-
-function installClickInterceptOnce(): void {
-  const w = window as unknown as Record<string, unknown>;
-  if (w[CLICK_FLAG]) return;
-  w[CLICK_FLAG] = true;
-  document.addEventListener(
-    'click',
-    (e) => {
-      const a = (e.target as Element | null)?.closest?.('a[href*="/users/"]');
-      if (!a) return;
-      const href = a.getAttribute('href') ?? '';
-      const m = href.match(/\/users\/(\d+)\/profile/);
-      if (!m) return;
-      const id = Number(m[1]);
-      if (Number.isFinite(id)) stashProfileNav(id);
-    },
-    true
-  );
-}
-
-function stashProfileNav(userId: number): void {
-  try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify({ id: userId, ts: Date.now() }));
-  } catch {
-    /* private mode etc. */
-  }
-}
-
-function readRecentProfileNav(): number | null {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const { id, ts } = JSON.parse(raw) as { id?: number; ts?: number };
-    if (typeof id !== 'number' || typeof ts !== 'number') return null;
-    if (Date.now() - ts > STALE_MS) return null;
-    return id;
-  } catch {
-    return null;
-  }
 }
 
 async function maybeRender(userId: number): Promise<void> {
@@ -457,7 +415,7 @@ async function loadCurrentlyWearing(userId: number, host: HTMLElement): Promise<
   const thumbs = await getAssetThumbnails(assetIds);
   const grid = el('div', { class: 'bp-grid' });
   for (const id of assetIds) {
-    const tile = el('a', { class: 'bp-tile', href: `/catalog/${id}/-` });
+    const tile = el('a', { class: 'bp-term-tile', href: `/catalog/${id}/-` });
     tile.appendChild(thumbImg(thumbs.get(id), 'asset'));
     host.appendChild(tile);
     grid.appendChild(tile);
@@ -1004,14 +962,14 @@ function ensureStyle(): void {
       display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px;
       scrollbar-width: thin;
     }
-    .bp-tile, .bp-friend-tile, .bp-game-card, .bp-group-card, .bp-badge-card {
+    .bp-term-tile, .bp-friend-tile, .bp-game-card, .bp-group-card, .bp-badge-card {
       display: flex; flex-direction: column; gap: 6px;
       flex: 0 0 auto; width: 150px;
       color: inherit; text-decoration: none;
       padding: 4px;
       border-radius: 8px;
     }
-    .bp-grid .bp-tile, .bp-grid .bp-game-card, .bp-grid .bp-badge-card,
+    .bp-grid .bp-term-tile, .bp-grid .bp-game-card, .bp-grid .bp-badge-card,
     .bp-grid .bp-group-card, .bp-grid .bp-friend-tile { width: auto; }
     .bp-show-all-btn {
       display: block;
@@ -1092,7 +1050,7 @@ function ensureStyle(): void {
       opacity: 0.65;
       cursor: progress;
     }
-    .bp-tile:hover, .bp-friend-tile:hover, .bp-game-card:hover, .bp-group-card:hover, .bp-badge-card:hover {
+    .bp-term-tile:hover, .bp-friend-tile:hover, .bp-game-card:hover, .bp-group-card:hover, .bp-badge-card:hover {
       background: rgba(255,255,255,0.06);
     }
     .bp-thumb {

@@ -8,6 +8,7 @@
 
 import { searchGames, SearchGame } from '@/api/searchGames';
 import { getGameIcons } from '@/api/thumbnails';
+import { escapeHtml } from '@/util/html';
 
 const ROW_ID = 'bloxplus-search-top';
 const STYLE_ID = 'bloxplus-search-style';
@@ -184,18 +185,6 @@ function ensureStyle(): void {
     .bp-search-top-meta > :first-child.bp-search-top-stat::before { content: ""; }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => {
-    switch (c) {
-      case '&': return '&amp;';
-      case '<': return '&lt;';
-      case '>': return '&gt;';
-      case '"': return '&quot;';
-      default: return '&#39;';
-    }
-  });
 }
 
 function waitFor<T extends Element>(selector: string, timeoutMs: number): Promise<T | null> {

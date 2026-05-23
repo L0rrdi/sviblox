@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getSettings, setSettings } from '@/storage/settingsStore';
+import { clearAllCustomizations } from '@/storage/customizationStore';
 import { getFolders, onFoldersChanged, FoldersState, FolderGame } from '@/storage/foldersStore';
 import { Settings } from '@/types';
 import {
@@ -26,17 +27,28 @@ interface SelectControl {
   options: { value: string; label: string }[];
 }
 
+type FeatureCategory = 'home' | 'game' | 'profile' | 'extras';
+
 interface FeatureRow {
   key: BooleanSettingKey;
   label: string;
   summary: string;
+  category: FeatureCategory;
   controls?: SelectControl[];
 }
+
+const CATEGORY_ORDER: { id: FeatureCategory; label: string }[] = [
+  { id: 'home', label: 'Home' },
+  { id: 'game', label: 'Game pages' },
+  { id: 'profile', label: 'Profiles' },
+  { id: 'extras', label: 'Themes & extras' },
+];
 
 const FEATURES: FeatureRow[] = [
   {
     key: 'homepageCleanup',
     label: 'Homepage cleanup',
+    category: 'home',
     summary:
       "Restyles your Roblox home page: Favorites, My Games, and Folders sections appear after Continue, and Standout / Recommended are grouped under a single collapsible dropdown.",
     controls: [
@@ -63,46 +75,47 @@ const FEATURES: FeatureRow[] = [
   {
     key: 'playtimeTracker',
     label: 'Playtime Tracker',
+    category: 'home',
     summary:
       "Tracks how long you spend in each experience (60-second presence polling while the browser is open) and shows the Your Most Played widget on the home page. One switch for tracking and the widget.",
   },
   {
     key: 'showGameBadges',
     label: 'Better Badges',
+    category: 'game',
     summary: 'Replaces game badge lists with ownership, rarity, won-yesterday/ever, and sort/filter controls.',
   },
   {
     key: 'showBadgeRarityColors',
     label: 'Color-code badge rarity',
+    category: 'game',
     summary:
       'Tints the rarity percentage in the Better Badges grid: green for easy, orange/red for medium/hard, gold for insane, purple for impossible. Off = uniform text color.',
   },
   {
     key: 'showGameStoreDevProducts',
     label: 'Show Dev products',
+    category: 'game',
     summary: 'Shows public developer products below Passes on game Store tabs.',
   },
   {
     key: 'showGameSubplaces',
     label: 'Show Subplaces',
+    category: 'game',
     summary:
       'Adds a collapsible Subplaces section above Your private servers, listing other places in the experience with thumbnails and a Play button.',
   },
   {
     key: 'showTotalSpent',
     label: 'Total spent on this experience',
+    category: 'game',
     summary:
       'Reads your purchase history (gamepasses, dev products, private servers) and totals the Robux you have spent on the current experience. First load on a session pulls your transaction history, then caches.',
   },
   {
-    key: 'showAccountValue',
-    label: 'Profile account value',
-    summary:
-      'Adds an estimated value card to profiles. Public profiles show collectible RAP; your own profile can also total known Robux purchases from transaction history.',
-  },
-  {
     key: 'showRobuxCash',
     label: 'Robux to currency converter',
+    category: 'game',
     summary:
       'Shows a real-money estimate beside every Robux price (gamepasses, dev products, store cards). Pick currency and which Roblox rate to use.',
     controls: [
@@ -129,24 +142,142 @@ const FEATURES: FeatureRow[] = [
     ],
   },
   {
+    key: 'showAccountValue',
+    label: 'Profile account value',
+    category: 'profile',
+    summary:
+      'Adds an estimated value card to profiles. Public profiles show collectible RAP; your own profile can also total known Robux purchases from transaction history.',
+  },
+  {
+    key: 'showAccountAge',
+    label: 'Account age pill',
+    category: 'profile',
+    summary:
+      "Adds a pill next to Friends/Followers/Following on profile pages showing the account's age in years and months. Display-only — clicking it does nothing.",
+  },
+  {
     key: 'showProfileNotes',
     label: 'Profile notes & nicknames',
+    category: 'profile',
     summary:
       'Adds a private notes card on other users\' profiles where you can record a personal nickname and a free-form note. The nickname appears as a (cosmetic) tag next to that user\'s displayed name across SviBlox surfaces. Stored locally; never sent anywhere.',
   },
   {
     key: 'showThemes',
     label: 'Themes page',
+    category: 'extras',
     summary:
       'Adds a "Themes" link to the left navigation that opens the SviBlox themes overlay on /home. Switch built-in presets, mix a custom palette, or upload a background image.',
   },
   {
     key: 'showUhbl',
     label: 'Ultra Hard Badge List (UHBL)',
+    category: 'extras',
     summary:
       'Adds a "UHBL" link to the left navigation. Mirrors the community-maintained Ultra Hard Badge List sheet, grouped by difficulty (★ tiers) with per-tier owned counts when signed in.',
   },
+  {
+    key: 'showCustomize',
+    label: 'Customize mode',
+    category: 'extras',
+    summary:
+      'Adds a "Customize" item to the Roblox header settings menu. Opens an edit overlay where you can rename, hide, or change icons on Roblox nav items. Edits persist across sessions. Turn this off to disable customize mode entirely — your edits stay saved but do not apply until re-enabled.',
+  },
 ];
+
+/**
+ * Probe Roblox API connectivity from the popup. One lightweight GET to a
+ * known-cheap endpoint (the authenticated-user check, already cached
+ * extension-side). Returns 'online' / 'offline' / 'checking'.
+ */
+function useApiStatus(): 'checking' | 'online' | 'offline' {
+  const [status, setStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  useEffect(() => {
+    let cancelled = false;
+    const ctrl = new AbortController();
+    const timeout = window.setTimeout(() => ctrl.abort(), 4000);
+    fetch('https://users.roblox.com/v1/users/authenticated', {
+      credentials: 'include',
+      signal: ctrl.signal,
+      cache: 'no-store',
+    })
+      .then((r) => {
+        // 200 (signed in) AND 401 (signed out but reachable) both prove the
+        // Roblox API is up. Only network failure or timeout → offline.
+        if (!cancelled) setStatus(r.ok || r.status === 401 ? 'online' : 'offline');
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('offline');
+      })
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      cancelled = true;
+      ctrl.abort();
+    };
+  }, []);
+  return status;
+}
+
+/**
+ * Watches chrome.storage.sync usage. Each setSettings write triggers
+ * a re-read. Critical so users near the 100 KB sync quota get warned
+ * before silent write failures start (lots of nicknames, hotkeys,
+ * custom themes are the usual culprits).
+ */
+function useSyncUsage(_settings: Settings | null): { bytes: number; pct: number } | null {
+  const [usage, setUsage] = useState<{ bytes: number; pct: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const QUOTA = chrome.storage.sync.QUOTA_BYTES ?? 102400;
+    const probe = () => {
+      chrome.storage.sync.getBytesInUse(null, (bytes) => {
+        if (cancelled) return;
+        setUsage({ bytes, pct: Math.round((bytes / QUOTA) * 100) });
+      });
+    };
+    probe();
+    chrome.storage.onChanged.addListener(probe);
+    return () => {
+      cancelled = true;
+      chrome.storage.onChanged.removeListener(probe);
+    };
+  }, [_settings]);
+  return usage;
+}
+
+function StatusStrip({ settings }: { settings: Settings | null }) {
+  const apiStatus = useApiStatus();
+  const usage = useSyncUsage(settings);
+  const apiClass =
+    apiStatus === 'online' ? 'sv-status-ok' :
+    apiStatus === 'offline' ? 'sv-status-bad' : 'sv-status-neutral';
+  const apiLabel =
+    apiStatus === 'online' ? 'Roblox API: connected' :
+    apiStatus === 'offline' ? 'Roblox API: unreachable' :
+    'Roblox API: checking…';
+  const usageClass = !usage ? 'sv-status-neutral' :
+    usage.pct >= 90 ? 'sv-status-bad' :
+    usage.pct >= 75 ? 'sv-status-warn' : 'sv-status-ok';
+  const usageLabel = usage
+    ? `Sync storage: ${(usage.bytes / 1024).toFixed(1)} / 100 KB (${usage.pct}%)`
+    : 'Sync storage: checking…';
+  return (
+    <div className="sv-status-strip">
+      <div className={`sv-status-pill ${apiClass}`} title={apiLabel}>
+        <span className="sv-status-dot" />
+        {apiStatus === 'offline' ? 'Offline' : apiStatus === 'online' ? 'Online' : '…'}
+      </div>
+      <div className={`sv-status-pill ${usageClass}`} title={usageLabel}>
+        Storage {usage ? `${usage.pct}%` : '…'}
+      </div>
+      {usage && usage.pct >= 90 && (
+        <div className="sv-status-warning" role="alert">
+          Sync storage almost full — new settings changes may stop saving. Consider exporting then clearing old custom themes or nicknames.
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function PopupApp() {
   const [settings, setLocal] = useState<Settings | null>(null);
@@ -181,73 +312,127 @@ export function PopupApp() {
     setLocal(next);
   };
 
-  const openOptions = () => chrome.runtime.openOptionsPage();
+  const openOptions = () => {
+    const url = chrome.runtime.getURL('options.html');
+    if (chrome.windows?.create) {
+      void chrome.windows.create({
+        url,
+        type: 'popup',
+        width: 1120,
+        height: 820,
+        focused: true,
+      }).catch(() => chrome.runtime.openOptionsPage());
+      return;
+    }
+    chrome.runtime.openOptionsPage();
+  };
+
+  const renderFeature = (feature: FeatureRow) => (
+    <div className="sv-feature-block" key={feature.key}>
+      <div className="sv-feature-row">
+        <div className="sv-feature-label">
+          <span>{feature.label}</span>
+          <button
+            className="sv-info"
+            type="button"
+            aria-label={`About ${feature.label}`}
+            aria-expanded={activeInfo === feature.key}
+            title={feature.summary}
+            onClick={() =>
+              setActiveInfo(activeInfo === feature.key ? null : feature.key)
+            }
+          >
+            !
+          </button>
+        </div>
+        <button
+          className={`sv-switch ${settings[feature.key] ? 'sv-switch-on' : ''}`}
+          type="button"
+          role="switch"
+          aria-checked={settings[feature.key]}
+          onClick={() => void toggle(feature.key)}
+        >
+          <span />
+        </button>
+      </div>
+      {activeInfo === feature.key && (
+        <div className="sv-feature-summary">
+          {feature.summary}
+          {feature.key === 'showCustomize' && (
+            <button
+              type="button"
+              className="sv-feature-action"
+              onClick={() => {
+                if (
+                  confirm(
+                    'Reset every customization? This clears all renames, hides, and icons. Cannot be undone.'
+                  )
+                ) {
+                  void clearAllCustomizations();
+                }
+              }}
+            >
+              Reset all customizations
+            </button>
+          )}
+        </div>
+      )}
+      {settings[feature.key] && feature.controls && (
+        <div className="sv-feature-controls">
+          {feature.controls.map((control) => (
+            <label className="sv-control-row" key={control.key}>
+              <span className="sv-control-label">{control.label}</span>
+              <select
+                className="sv-select"
+                value={settings[control.key] as string}
+                onChange={(e) => void setSelect(control.key, e.target.value)}
+              >
+                {control.options.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="sv-popup">
       <style>{popupCss}</style>
+      <StatusStrip settings={settings} />
       <section className="sv-panel">
         <div className="sv-title-row">
           <h1>General Features</h1>
           <button className="sv-options" type="button" onClick={openOptions}>
-            Options
+            Advanced options
           </button>
         </div>
 
-        <div className="sv-feature-list">
-          {FEATURES.map((feature) => (
-            <div className="sv-feature-block" key={feature.key}>
-              <div className="sv-feature-row">
-                <div className="sv-feature-label">
-                  <span>{feature.label}</span>
-                  <button
-                    className="sv-info"
-                    type="button"
-                    aria-label={`About ${feature.label}`}
-                    aria-expanded={activeInfo === feature.key}
-                    title={feature.summary}
-                    onClick={() =>
-                      setActiveInfo(activeInfo === feature.key ? null : feature.key)
-                    }
-                  >
-                    !
-                  </button>
-                </div>
-                <button
-                  className={`sv-switch ${settings[feature.key] ? 'sv-switch-on' : ''}`}
-                  type="button"
-                  role="switch"
-                  aria-checked={settings[feature.key]}
-                  onClick={() => void toggle(feature.key)}
-                >
-                  <span />
-                </button>
-              </div>
-              {activeInfo === feature.key && (
-                <div className="sv-feature-summary">{feature.summary}</div>
-              )}
-              {settings[feature.key] && feature.controls && (
-                <div className="sv-feature-controls">
-                  {feature.controls.map((control) => (
-                    <label className="sv-control-row" key={control.key}>
-                      <span className="sv-control-label">{control.label}</span>
-                      <select
-                        className="sv-select"
-                        value={settings[control.key] as string}
-                        onChange={(e) => void setSelect(control.key, e.target.value)}
-                      >
-                        {control.options.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
+        <div className="sv-category-list">
+          {CATEGORY_ORDER.map((cat, idx) => {
+            const items = FEATURES.filter((f) => f.category === cat.id);
+            if (!items.length) return null;
+            const enabledCount = items.filter((f) => settings[f.key]).length;
+            return (
+              <details
+                className="sv-category"
+                key={cat.id}
+                open={idx === 0}
+              >
+                <summary className="sv-category-summary">
+                  <span className="sv-category-name">{cat.label}</span>
+                  <span className="sv-category-count">
+                    {enabledCount} / {items.length}
+                  </span>
+                </summary>
+                <div className="sv-feature-list">{items.map(renderFeature)}</div>
+              </details>
+            );
+          })}
         </div>
       </section>
 
@@ -294,12 +479,16 @@ function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) 
     [hotkeys, foldersState]
   );
 
-  const usedKeys = new Map<string, string>(); // key -> destId
-  for (const [destId, key] of Object.entries(hotkeys)) usedKeys.set(key, destId);
+  const usedKeys = hotkeyUsageMap(hotkeys);
+  const conflictByDest = hotkeyConflictMap(hotkeys);
+  const groupedEntries = useMemo(
+    () => groupHotkeyEntries(entries),
+    [entries]
+  );
 
   const submit = async (destId: string, key: string): Promise<void> => {
     const existingKey = hotkeys[destId];
-    const conflictDest = usedKeys.get(key);
+    const conflictDest = usedKeys.get(key)?.find((id) => id !== destId);
     if (conflictDest && conflictDest !== destId) {
       // Defer write until user confirms.
       setConflict({ destId, key, existingDestId: conflictDest });
@@ -347,15 +536,26 @@ function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) 
 
       {entries.length > 0 && (
         <div className="sv-hotkey-list">
-          {entries.map(([destId, key]) => (
-            <HotkeyRow
-              key={destId}
-              destId={destId}
-              keyChar={key}
-              foldersState={foldersState}
-              onRebind={(newKey) => submit(destId, newKey)}
-              onDelete={() => remove(destId)}
-            />
+          {conflictByDest.size > 0 && (
+            <div className="sv-hotkey-conflict-summary">
+              {conflictByDest.size} hotkey{conflictByDest.size === 1 ? '' : 's'} need attention.
+            </div>
+          )}
+          {groupedEntries.map((group) => (
+            <div className="sv-hotkey-group" key={group.id}>
+              <div className="sv-hotkey-group-title">{group.label}</div>
+              {group.items.map(([destId, key]) => (
+                <HotkeyRow
+                  key={destId}
+                  destId={destId}
+                  keyChar={key}
+                  conflictText={conflictByDest.get(destId)}
+                  foldersState={foldersState}
+                  onRebind={(newKey) => submit(destId, newKey)}
+                  onDelete={() => remove(destId)}
+                />
+              ))}
+            </div>
           ))}
         </div>
       )}
@@ -370,6 +570,7 @@ function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) 
       ) : adding ? (
         <AddHotkeyRow
           existingDestIds={new Set(Object.keys(hotkeys))}
+          usedKeys={usedKeys}
           foldersState={foldersState}
           onSave={submit}
           onCancel={() => setAdding(false)}
@@ -390,12 +591,14 @@ function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) 
 function HotkeyRow({
   destId,
   keyChar,
+  conflictText,
   foldersState,
   onRebind,
   onDelete,
 }: {
   destId: string;
   keyChar: string;
+  conflictText?: string;
   foldersState: FoldersState;
   onRebind: (newKey: string) => Promise<void> | void;
   onDelete: () => Promise<void> | void;
@@ -426,17 +629,20 @@ function HotkeyRow({
       >
         ×
       </button>
+      {conflictText && <div className="sv-hotkey-inline-conflict">{conflictText}</div>}
     </div>
   );
 }
 
 function AddHotkeyRow({
   existingDestIds,
+  usedKeys,
   foldersState,
   onSave,
   onCancel,
 }: {
   existingDestIds: Set<string>;
+  usedKeys: Map<string, string[]>;
   foldersState: FoldersState;
   onSave: (destId: string, key: string) => Promise<void> | void;
   onCancel: () => void;
@@ -452,6 +658,9 @@ function AddHotkeyRow({
     mode === 'folder-game' && gameUniverseId
       ? makeFolderGameHotkeyId(Number(gameUniverseId))
       : destId;
+  const keyConflictDest = keyChar
+    ? usedKeys.get(keyChar)?.find((id) => id !== selectedDestId)
+    : undefined;
 
   useEffect(() => {
     if (mode !== 'folder-game') return;
@@ -575,8 +784,56 @@ function AddHotkeyRow({
       <button className="sv-hotkey-add-cancel" type="button" onClick={onCancel}>
         Cancel
       </button>
+      {keyConflictDest && (
+        <div className="sv-hotkey-inline-conflict">
+          {keyChar.toUpperCase()} is already bound to {hotkeyLabel(keyConflictDest, foldersState)}.
+        </div>
+      )}
     </div>
   );
+}
+
+function hotkeyUsageMap(hotkeys: Record<string, string>): Map<string, string[]> {
+  const used = new Map<string, string[]>();
+  for (const [destId, key] of Object.entries(hotkeys)) {
+    if (!key) continue;
+    const list = used.get(key) ?? [];
+    list.push(destId);
+    used.set(key, list);
+  }
+  return used;
+}
+
+function hotkeyConflictMap(hotkeys: Record<string, string>): Map<string, string> {
+  const used = hotkeyUsageMap(hotkeys);
+  const conflicts = new Map<string, string>();
+  for (const [key, destIds] of used) {
+    if (destIds.length <= 1) continue;
+    for (const destId of destIds) {
+      conflicts.set(destId, `${key.toUpperCase()} is also used by another hotkey.`);
+    }
+  }
+  return conflicts;
+}
+
+function groupHotkeyEntries(entries: Array<[string, string]>): Array<{
+  id: string;
+  label: string;
+  items: Array<[string, string]>;
+}> {
+  const groups = [
+    { id: 'game', label: 'Game page', items: [] as Array<[string, string]> },
+    { id: 'site', label: 'Site', items: [] as Array<[string, string]> },
+    { id: 'folder', label: 'Folder games', items: [] as Array<[string, string]> },
+  ];
+  for (const entry of entries) {
+    const [destId] = entry;
+    const dest = HOTKEY_DESTINATION_BY_ID.get(destId);
+    if (parseFolderGameHotkeyId(destId) !== null) groups[2].items.push(entry);
+    else if (dest?.scope === 'site') groups[1].items.push(entry);
+    else groups[0].items.push(entry);
+  }
+  return groups.filter((group) => group.items.length > 0);
 }
 
 function hotkeyLabel(destId: string, foldersState: FoldersState): string {
@@ -701,6 +958,46 @@ const popupCss = `
   .sv-popup-loading {
     padding: 18px;
   }
+  .sv-status-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 38px;
+    background: rgba(0,0,0,0.18);
+    border-bottom: 1px solid rgba(0,0,0,0.25);
+    font-size: 11px;
+  }
+  .sv-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+  }
+  .sv-status-pill.sv-status-ok    { border-color: rgba(46,178,76,0.45); color: #aff0bf; }
+  .sv-status-pill.sv-status-warn  { border-color: rgba(245,190,65,0.45); color: #ffe08a; }
+  .sv-status-pill.sv-status-bad   { border-color: rgba(217,83,79,0.55); color: #ff9d99; }
+  .sv-status-pill.sv-status-neutral { color: rgba(255,255,255,0.7); }
+  .sv-status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+  }
+  .sv-status-warning {
+    flex-basis: 100%;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(217,83,79,0.16);
+    border: 1px solid rgba(217,83,79,0.4);
+    color: #ffd1ce;
+    font-size: 11px;
+    line-height: 1.4;
+  }
   .sv-panel {
     min-height: 100%;
     box-sizing: border-box;
@@ -737,8 +1034,61 @@ const popupCss = `
   .sv-options:hover {
     background: #35a1f2;
   }
-  .sv-feature-list {
+  .sv-category-list {
     margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sv-category {
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.12);
+    overflow: hidden;
+  }
+  .sv-category[open] {
+    background: rgba(0,0,0,0.18);
+  }
+  .sv-category-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: rgba(255,255,255,0.92);
+  }
+  .sv-category-summary::-webkit-details-marker { display: none; }
+  .sv-category-summary::before {
+    content: '▸';
+    display: inline-block;
+    margin-right: 8px;
+    transition: transform 0.12s ease;
+    color: rgba(255,255,255,0.55);
+    font-size: 10px;
+  }
+  .sv-category[open] > .sv-category-summary::before {
+    transform: rotate(90deg);
+  }
+  .sv-category-name {
+    flex: 1;
+    min-width: 0;
+  }
+  .sv-category-count {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.55);
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .sv-feature-list {
+    padding: 4px 12px 8px;
   }
   .sv-feature-block {
     margin: 0;
@@ -818,6 +1168,22 @@ const popupCss = `
     font-size: 12px;
     line-height: 1.35;
   }
+  .sv-feature-action {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 4px;
+    border: 1px solid rgba(217, 83, 79, 0.5);
+    background: transparent;
+    color: #ff8a85;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .sv-feature-action:hover {
+    background: rgba(217, 83, 79, 0.16);
+  }
   .sv-feature-controls {
     display: flex;
     flex-direction: column;
@@ -848,6 +1214,11 @@ const popupCss = `
     padding: 4px 8px;
     min-width: 170px;
     cursor: pointer;
+    color-scheme: dark;
+  }
+  .sv-select option {
+    background: #1f252b;
+    color: #fff;
   }
   .sv-select:focus {
     outline: 1px solid #1f9be6;
@@ -887,12 +1258,34 @@ const popupCss = `
   .sv-hotkey-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 10px;
     margin-bottom: 8px;
+  }
+  .sv-hotkey-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sv-hotkey-group-title {
+    font-size: 11px;
+    font-weight: 800;
+    color: rgba(255,255,255,0.54);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .sv-hotkey-conflict-summary {
+    padding: 7px 9px;
+    border-radius: 5px;
+    background: rgba(217, 83, 79, 0.12);
+    border: 1px solid rgba(217, 83, 79, 0.36);
+    color: #ffb1ad;
+    font-size: 12px;
+    line-height: 1.35;
   }
   .sv-hotkey-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 6px 8px;
     border-radius: 5px;
@@ -1051,5 +1444,169 @@ const popupCss = `
   .sv-hotkey-conflict-actions button:last-child {
     background: rgba(255,255,255,0.08);
     color: rgba(255,255,255,0.78);
+  }
+  .sv-hotkey-inline-conflict {
+    flex-basis: 100%;
+    color: #ffb1ad;
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .sv-panel-backup {
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .sv-panel-playtime-manager {
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .sv-playtime-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    list-style: none;
+    font-size: 14px;
+    font-weight: 800;
+  }
+  .sv-playtime-summary::-webkit-details-marker { display: none; }
+  .sv-playtime-summary::before {
+    content: '▸';
+    margin-right: 2px;
+    color: rgba(255,255,255,0.55);
+    font-size: 10px;
+    transition: transform 0.12s ease;
+  }
+  .sv-panel-playtime-manager[open] .sv-playtime-summary::before {
+    transform: rotate(90deg);
+  }
+  .sv-playtime-summary span:first-child {
+    flex: 1;
+    min-width: 0;
+  }
+  .sv-playtime-chip {
+    flex: 0 0 auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.10);
+    color: rgba(255,255,255,0.62);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .sv-playtime-manager-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sv-playtime-grid,
+  .sv-playtime-add {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .sv-playtime-add {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: end;
+  }
+  .sv-playtime-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 11px;
+    color: rgba(255,255,255,0.62);
+  }
+  .sv-playtime-field input,
+  .sv-playtime-field select {
+    height: 30px;
+    box-sizing: border-box;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.14);
+    background: rgba(0,0,0,0.18);
+    color: #fff;
+    padding: 0 8px;
+    font: 12px/1 inherit;
+    min-width: 0;
+    color-scheme: dark;
+  }
+  .sv-playtime-field select,
+  .sv-playtime-field select option {
+    background: #1f252b;
+    color: #fff;
+  }
+  .sv-playtime-actions,
+  .sv-playtime-warning {
+    display: flex;
+    gap: 8px;
+  }
+  .sv-playtime-actions button,
+  .sv-playtime-add button,
+  .sv-playtime-warning button {
+    height: 30px;
+    padding: 0 10px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    font: 700 12px/1 inherit;
+    cursor: pointer;
+  }
+  .sv-playtime-actions button:hover,
+  .sv-playtime-add button:hover,
+  .sv-playtime-warning button:hover {
+    background: rgba(255,255,255,0.14);
+  }
+  .sv-playtime-actions .sv-danger-btn {
+    border-color: rgba(217,83,79,0.45);
+    color: #ffb1ad;
+  }
+  .sv-playtime-warning {
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 5px;
+    border: 1px solid rgba(245,190,65,0.34);
+    background: rgba(245,190,65,0.10);
+    color: #ffe08a;
+    font-size: 12px;
+  }
+  .sv-backup-blurb {
+    margin: 8px 0 12px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.72);
+  }
+  .sv-backup-row {
+    display: flex;
+    gap: 8px;
+  }
+  .sv-backup-btn {
+    flex: 1;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    color: #fff;
+    font: 700 12px/1 inherit;
+    cursor: pointer;
+  }
+  .sv-backup-btn:hover {
+    background: rgba(255,255,255,0.12);
+    border-color: rgba(255,255,255,0.30);
+  }
+  .sv-backup-status {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .sv-backup-status-ok {
+    background: rgba(46,178,76,0.14);
+    border: 1px solid rgba(46,178,76,0.40);
+    color: #aff0bf;
+  }
+  .sv-backup-status-err {
+    background: rgba(217,83,79,0.14);
+    border: 1px solid rgba(217,83,79,0.40);
+    color: #ffd1ce;
   }
 `;

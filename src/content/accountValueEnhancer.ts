@@ -8,6 +8,7 @@ import {
 } from '@/api/accountValue';
 import { getAuthenticatedUserId } from '@/api/users';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml } from '@/util/html';
 
 const ROOT_ID = 'bloxplus-account-value';
 const STYLE_ID = 'bloxplus-account-value-style';
@@ -475,10 +476,4 @@ function ensureStyle(): void {
     }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
 }

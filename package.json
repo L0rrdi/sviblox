@@ -1,6 +1,6 @@
 {
   "name": "sviblox",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Privacy-conscious browser extension for Roblox home sections, badges, themes, and local playtime tracking.",
   "type": "module",

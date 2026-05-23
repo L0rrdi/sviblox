@@ -1,10 +1,13 @@
 import { getAuthenticatedUserId, getCombinedNames } from '@/api/users';
 import { getMyFriends } from '@/api/friends';
 import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
+import { getGameInfo } from '@/api/games';
 import { getUserAvatarHeadshots, getGameIcons, getGroupIcons, getAssetThumbnails } from '@/api/thumbnails';
 import { getUserCollectibles, CollectibleAsset } from '@/api/accountValue';
 import { getUserGroups, getUserInventoryItems, InventoryItem, UserGroup } from '@/api/mutuals';
 import { ensureAnnotationsPrimed, getNickname } from '@/storage/profileAnnotations';
+import { getFolders, FolderGame } from '@/storage/foldersStore';
+import { escapeHtml, escapeAttr } from '@/util/html';
 
 const TAB_ID = 'mutuals';
 const ROOT_ID = 'bloxplus-mutuals-panel';
@@ -13,7 +16,8 @@ const INSTALLED_FLAG = '__bpMutualsInstalled';
 const HIDDEN_ATTR = 'data-bp-mutuals-hidden';
 const FRIEND_SAMPLE_LIMIT = 40;
 
-type MutualCategory = 'friends' | 'favorites' | 'groups' | 'items' | 'limiteds';
+type MutualCategory = 'friends' | 'favorites' | 'groups' | 'items' | 'limiteds' | 'folder-games';
+type AcrossFriendsCategory = Exclude<MutualCategory, 'friends' | 'folder-games'>;
 
 interface OwnerRef {
   id?: number;
@@ -319,6 +323,7 @@ function renderShell(root: HTMLElement, bodyHtml: string): void {
       <select id="bp-mutuals-category" class="input-field form-control">
         <option value="friends"${selectedCategory === 'friends' ? ' selected' : ''}>Mutual Friends</option>
         <option value="favorites"${selectedCategory === 'favorites' ? ' selected' : ''}>Favorite Games</option>
+        <option value="folder-games"${selectedCategory === 'folder-games' ? ' selected' : ''}>Folder Games</option>
         <option value="groups"${selectedCategory === 'groups' ? ' selected' : ''}>Groups</option>
         <option value="items"${selectedCategory === 'items' ? ' selected' : ''}>Items</option>
         <option value="limiteds"${selectedCategory === 'limiteds' ? ' selected' : ''}>Limiteds</option>
@@ -345,8 +350,14 @@ async function loadCategory(profileUserId: number, category: MutualCategory): Pr
 
   if (category === 'friends') {
     return isOwnProfile
-      ? emptyState('Open the dropdown to compare favorites, groups, items, or limiteds across your friends list.')
+      ? emptyState('Open the dropdown to compare favorites, folder games, groups, items, or limiteds across your friends list.')
       : renderMutualFriends(myId, profileUserId);
+  }
+
+  if (category === 'folder-games') {
+    return isOwnProfile
+      ? renderFolderGamesAcrossFriends(myId)
+      : emptyState('Folder Games comparison is only available on your own friends page.');
   }
 
   return isOwnProfile
@@ -388,7 +399,7 @@ async function renderMutualFriends(myId: number, profileUserId: number): Promise
 async function renderAgainstProfile(
   myId: number,
   profileUserId: number,
-  category: Exclude<MutualCategory, 'friends'>
+  category: AcrossFriendsCategory
 ): Promise<string> {
   const [mine, theirs] = await Promise.all([
     loadUserCategory(myId, category),
@@ -400,7 +411,7 @@ async function renderAgainstProfile(
 
 async function renderAcrossFriends(
   myId: number,
-  category: Exclude<MutualCategory, 'friends'>
+  category: AcrossFriendsCategory
 ): Promise<string> {
   const friends = (await getMyFriends(myId)).slice(0, FRIEND_SAMPLE_LIMIT);
   if (!friends.length) return emptyState('No friends found to compare.');
@@ -442,9 +453,76 @@ async function renderAcrossFriends(
   return note + (await renderRows(rows, category));
 }
 
+async function renderFolderGamesAcrossFriends(myId: number): Promise<string> {
+  const { folders } = await getFolders();
+  const seen = new Set<number>();
+  const folderGames: FolderGame[] = [];
+  for (const folder of folders) {
+    for (const game of folder.games) {
+      if (seen.has(game.universeId)) continue;
+      seen.add(game.universeId);
+      folderGames.push(game);
+    }
+  }
+  if (!folderGames.length) {
+    return emptyState("You don't have any games saved in folders yet.");
+  }
+
+  const friends = await getMyFriends(myId);
+  if (!friends.length) return emptyState('No friends found to compare.');
+
+  const missingInfoIds = folderGames.filter((g) => !g.name || !g.placeId).map((g) => g.universeId);
+  const [friendNames, gameInfo] = await Promise.all([
+    getCombinedNames(friends.map((f) => f.id)),
+    missingInfoIds.length ? getGameInfo(missingInfoIds) : Promise.resolve(new Map()),
+  ]);
+  const names = new Map(
+    friends.map((f) => [
+      f.id,
+      friendNames.get(f.id)?.names?.combinedName || f.displayName || f.name || `User ${f.id}`,
+    ])
+  );
+
+  const byId = new Map<number, AggregateRow>();
+  for (const g of folderGames) {
+    const info = gameInfo.get(g.universeId);
+    const placeId = g.placeId ?? info?.rootPlaceId;
+    const name = g.name || info?.name || `Game ${g.universeId}`;
+    byId.set(g.universeId, {
+      id: g.universeId,
+      name,
+      href: placeId ? `/games/${placeId}` : `/discover/?Keyword=${encodeURIComponent(name)}`,
+      count: 0,
+      owners: [],
+    });
+  }
+
+  await mapLimit(friends, 5, async (friend) => {
+    const favorites = await getFavoriteGames(friend.id, 100).catch(() => [] as FavoriteGame[]);
+    for (const fav of favorites) {
+      const row = byId.get(fav.id);
+      if (!row) continue;
+      row.count += 1;
+      row.owners.push({ id: friend.id, name: names.get(friend.id) ?? friend.name });
+    }
+  });
+
+  const rows = [...byId.values()]
+    .filter((r) => r.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, 60);
+  if (!rows.length) {
+    return emptyState(
+      `None of your folder games are favorited by any of your ${friends.length} friends.`
+    );
+  }
+  const note = `<p class="bp-mutuals-note">Folder games your ${friends.length} friends have favorited.</p>`;
+  return note + (await renderRows(rows, 'folder-games'));
+}
+
 async function loadUserCategory(
   userId: number,
-  category: Exclude<MutualCategory, 'friends'>
+  category: AcrossFriendsCategory
 ): Promise<AggregateRow[]> {
   switch (category) {
     case 'favorites':
@@ -526,7 +604,7 @@ function intersectRows(a: AggregateRow[], b: AggregateRow[]): AggregateRow[] {
 async function renderRows(rows: AggregateRow[], category: MutualCategory): Promise<string> {
   const ids = rows.map((row) => row.id);
   let thumbs = new Map<number, string>();
-  if (category === 'favorites') thumbs = await getGameIcons(ids);
+  if (category === 'favorites' || category === 'folder-games') thumbs = await getGameIcons(ids);
   if (category === 'groups') thumbs = await getGroupIcons(ids);
   if (category === 'items' || category === 'limiteds') thumbs = await getAssetThumbnails(ids);
   return renderGrid(rows.map((row) => ({ ...row, thumb: thumbs.get(row.id) })));
@@ -774,14 +852,4 @@ function ensureStyle(): void {
 
 function formatNumber(n: number): string {
   return new Intl.NumberFormat().format(n);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
 }

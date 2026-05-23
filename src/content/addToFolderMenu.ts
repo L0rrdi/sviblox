@@ -6,6 +6,7 @@
  */
 
 import { addGameToFolder, createFolder, getFolders, FolderGame } from '@/storage/foldersStore';
+import { escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-folder-menu-style';
 const MENU_ID = 'bloxplus-folder-menu';
@@ -148,10 +149,4 @@ function ensureStyle(): void {
     .bp-folder-menu-new .bp-folder-menu-name { color: #4a90e2; }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
 }

@@ -14,10 +14,27 @@ import { getBadgeIcons, getPlaceIcons } from '@/api/thumbnails';
 import { getAuthenticatedUserId } from '@/api/users';
 import { UhblBadge, UhblTier } from '@/types';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml, escapeAttr } from '@/util/html';
 
 const PAGE_ID = 'bloxplus-uhbl-page';
 const STYLE_ID = 'bloxplus-uhbl-page-style';
 const HIDE_ATTR = 'data-bp-uhbl-hidden';
+
+// Star banners pulled from the UHBL community sheet's STARDIV separator
+// rows so tier headings match the sheet visually. Each tier has its own
+// color/style — they are NOT N copies of a single-star image. Indexed by
+// parser difficulty: d=2 is ½★, d=3..8 are 1★..6★. Parser d=1 is unused
+// (no badges land there — the sheet's first STARDIV sits before any badge
+// data) so we skip it.
+const STAR_IMG_BY_DIFFICULTY: Record<number, string> = (() => {
+  const out: Record<number, string> = {
+    2: chrome.runtime.getURL('public/icons/uhbl-star-half.png'),
+  };
+  for (let d = 3; d <= 8; d++) {
+    out[d] = chrome.runtime.getURL(`public/icons/uhbl-star-${d - 2}.png`);
+  }
+  return out;
+})();
 
 interface Filters {
   query: string;
@@ -171,6 +188,7 @@ async function resolveOwnership(page: HTMLElement, loadId: number): Promise<void
     state.owned = owned;
     state.ownedLoaded = true;
     updateOwnedIndicators(page);
+    updateMeta(page);
     applyFilters(page);
   } catch {
     // Owned check is best-effort.
@@ -290,6 +308,33 @@ function updateMeta(page: HTMLElement): void {
   const total = state.badges.length;
   const when = state.fetchedAt ? formatRelative(state.fetchedAt) : '–';
   el.textContent = `${total} badges · fetched ${when}`;
+  updateOverallProgress(page);
+}
+
+function updateOverallProgress(page: HTMLElement): void {
+  const el = page.querySelector<HTMLElement>('[data-uhbl-progress]');
+  if (!el) return;
+  const total = state.badges.length;
+  if (!state.signedInUserId || !state.ownedLoaded || total === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  let owned = 0;
+  for (const date of state.owned.values()) if (date) owned += 1;
+  const pct = Math.round((owned / total) * 100);
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="bp-uhbl-progress-counts">
+      <strong class="bp-uhbl-progress-owned">${owned}</strong>
+      <span class="bp-uhbl-progress-divider">/</span>
+      <span class="bp-uhbl-progress-total">${total}</span>
+      <span class="bp-uhbl-progress-label">UHBL badges owned</span>
+    </div>
+    <div class="bp-uhbl-progress-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="UHBL completion">
+      <div class="bp-uhbl-progress-bar-fill" style="width: ${pct}%"></div>
+      <span class="bp-uhbl-progress-pct">${pct}%</span>
+    </div>
+  `;
 }
 
 function renderSkeleton(page: HTMLElement): void {
@@ -302,6 +347,7 @@ function renderSkeleton(page: HTMLElement): void {
         <button class="bp-uhbl-btn" data-action="refresh">Refresh</button>
         <a class="bp-uhbl-btn bp-uhbl-btn-ghost" href="https://docs.google.com/spreadsheets/d/17HE0xTN5tuq8BAkwvtP17tlJW8rpFNI3WzbI4LYXchk/htmlview" target="_blank" rel="noopener">Open source sheet</a>
       </div>
+      <div class="bp-uhbl-progress" data-uhbl-progress style="display:none"></div>
     </header>
     <div class="bp-uhbl-filters">
       <input type="search" class="bp-uhbl-search" placeholder="Search game or badge name..." data-filter="query" />
@@ -387,13 +433,15 @@ function renderRows(page: HTMLElement): void {
 }
 
 /**
- * Maps raw difficulty (1..8) to the display number of stars.
- * difficulty=1 reserves the ½★ tier (currently no badges land there in the
- * sheet, but the leading STARDIV at row 3 anchors it). Real groups are 2..8,
- * which render as 1..7 stars.
+ * Maps raw parser difficulty (1..8) to the display number of stars.
+ * Parser d=1 is unused (the sheet's first STARDIV sits before any badge
+ * data, so the running difficulty advances to ≥2 before any badge is parsed).
+ * d=2 → ½★, d=3..8 → 1..6★. Max tier in the sheet today is 6★ (parser d=8).
  */
 function difficultyToStars(d: number): number {
-  return d === 1 ? 0.5 : d - 1;
+  if (d <= 1) return 0;
+  if (d === 2) return 0.5;
+  return d - 2;
 }
 
 function formatDifficultyLabel(d: number): string {
@@ -406,7 +454,7 @@ function renderDifficultyGroup(difficulty: number, rows: UhblBadge[]): string {
   return `
     <details class="bp-uhbl-tier" data-difficulty="${difficulty}" open>
       <summary>
-        <span class="bp-uhbl-tier-stars" title="Difficulty: ${escapeAttr(formatDifficultyLabel(difficulty))} star${difficulty === 2 ? '' : 's'}">${renderStars(difficultyToStars(difficulty))}</span>
+        <span class="bp-uhbl-tier-stars" title="Difficulty: ${escapeAttr(formatDifficultyLabel(difficulty))} star${difficultyToStars(difficulty) === 1 ? '' : 's'}">${renderStars(difficulty)}</span>
         <span class="bp-uhbl-tier-label">Difficulty ${formatDifficultyLabel(difficulty)}</span>
         <span class="bp-uhbl-tier-owned" data-tier-owned data-total="${total}" style="display:none">0 / ${total} owned</span>
         <span class="bp-uhbl-tier-count" data-tier-count>${total}</span>
@@ -418,13 +466,10 @@ function renderDifficultyGroup(difficulty: number, rows: UhblBadge[]): string {
   `;
 }
 
-function renderStars(stars: number): string {
-  const full = Math.floor(stars);
-  const half = stars - full >= 0.5;
-  const symbols: string[] = [];
-  for (let i = 0; i < full; i++) symbols.push('★');
-  if (half) symbols.push('½');
-  return `<span class="bp-uhbl-stars-filled">${symbols.join('')}</span>`;
+function renderStars(difficulty: number): string {
+  const banner = STAR_IMG_BY_DIFFICULTY[difficulty];
+  if (!banner) return '<span class="bp-uhbl-stars-filled"></span>';
+  return `<span class="bp-uhbl-stars-filled"><img class="bp-uhbl-star-img" src="${banner}" alt="" /></span>`;
 }
 
 function cssTier(t: UhblTier): string {
@@ -443,7 +488,7 @@ function buildDifficultyPills(page: HTMLElement, difficulties: number[]): void {
   host.innerHTML = difficulties
     .map((d) => {
       const label = formatDifficultyLabel(d);
-      return `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-difficulty" data-difficulty="${d}" title="Difficulty ${label}">${renderStars(difficultyToStars(d))}</button>`;
+      return `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-difficulty" data-difficulty="${d}" title="Difficulty ${label}">${renderStars(d)}</button>`;
     })
     .join('');
   for (const btn of host.querySelectorAll<HTMLButtonElement>('.bp-uhbl-pill')) {
@@ -497,6 +542,7 @@ function renderRow(b: UhblBadge): string {
       <div class="bp-uhbl-body">
         <div class="bp-uhbl-line-top">
           <a class="bp-uhbl-badge-link" href="${escapeAttr(b.badgeUrl)}" rel="noopener">${escapeHtml(b.badgeName)}</a>
+          ${renderMediaButton(b)}
           <span class="bp-owned-pill" title="Loading...">?</span>
         </div>
         <div class="bp-uhbl-line-game">
@@ -510,6 +556,15 @@ function renderRow(b: UhblBadge): string {
       </div>
     </article>
   `;
+}
+
+function renderMediaButton(b: UhblBadge): string {
+  if (!b.videoUrl) return '';
+  // Media label matches the sheet's col E text (Completion / Guide / Raw
+  // Footage / Verification / Badge Awarded / Playlist). Falls back to
+  // "Watch" if the sheet has the link but a blank label.
+  const label = b.media?.trim() || 'Watch';
+  return `<a class="bp-uhbl-media-btn" href="${escapeAttr(b.videoUrl)}" target="_blank" rel="noopener" title="${escapeAttr(label)}">▶ ${escapeHtml(label)}</a>`;
 }
 
 function collectTags(badges: UhblBadge[]): string[] {
@@ -618,16 +673,6 @@ function formatRelative(ts: number): string {
   return `${d}d ago`;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
-}
-
 function ensureStyle(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -652,6 +697,45 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-uhbl-btn:hover { background: rgba(255,255,255,0.12); }
     #${PAGE_ID} .bp-uhbl-btn-ghost { opacity: 0.85; }
+
+    #${PAGE_ID} .bp-uhbl-progress {
+      margin: 4px 0 22px 0;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(255,82,143,0.14), rgba(124,58,237,0.10));
+      border: 1px solid rgba(255,82,143,0.32);
+      display: flex; flex-direction: column; gap: 10px;
+      max-width: 520px;
+    }
+    #${PAGE_ID} .bp-uhbl-progress-counts {
+      display: flex; align-items: baseline; gap: 6px;
+      font-size: 13px; opacity: 0.85;
+    }
+    #${PAGE_ID} .bp-uhbl-progress-owned {
+      font-size: 22px; font-weight: 700;
+      color: #ff8aba;
+      line-height: 1;
+    }
+    #${PAGE_ID} .bp-uhbl-progress-divider { font-size: 18px; opacity: 0.5; }
+    #${PAGE_ID} .bp-uhbl-progress-total { font-size: 18px; font-weight: 600; }
+    #${PAGE_ID} .bp-uhbl-progress-label { margin-left: 6px; font-size: 12px; opacity: 0.7; }
+    #${PAGE_ID} .bp-uhbl-progress-bar {
+      position: relative;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+    #${PAGE_ID} .bp-uhbl-progress-bar-fill {
+      position: absolute; inset: 0 auto 0 0;
+      background: linear-gradient(90deg, #ff528f, #c084fc);
+      border-radius: 999px;
+      transition: width 0.3s ease-out;
+    }
+    #${PAGE_ID} .bp-uhbl-progress-pct {
+      position: absolute; right: 0; top: 12px;
+      font-size: 11px; font-weight: 600; opacity: 0.7;
+    }
 
     #${PAGE_ID} .bp-uhbl-filters {
       display: flex; flex-direction: column; gap: 12px;
@@ -723,9 +807,16 @@ function ensureStyle(): void {
       transform: rotate(-90deg);
     }
     #${PAGE_ID} .bp-uhbl-tier-stars {
-      font-size: 18px; letter-spacing: 1px; line-height: 1;
+      font-size: 18px; line-height: 1;
       white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 2px;
     }
+    #${PAGE_ID} .bp-uhbl-star-img {
+      height: 22px; width: auto;
+      display: inline-block; vertical-align: middle;
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35));
+    }
+    #${PAGE_ID} .bp-uhbl-pill-difficulty .bp-uhbl-star-img { height: 14px; }
     #${PAGE_ID} .bp-uhbl-stars-filled { color: #f3c84b; }
     #${PAGE_ID} .bp-uhbl-stars-empty { color: rgba(255,255,255,0.18); }
     #${PAGE_ID} .bp-uhbl-tier-label { font-size: 15px; font-weight: 600; }
@@ -780,6 +871,15 @@ function ensureStyle(): void {
       border: 1px solid rgba(255,255,255,0.06);
       border-radius: 8px;
       min-width: 0;
+      transition: background 0.15s ease-out, border-color 0.15s ease-out;
+    }
+    /* Highlight whole-row tint for badges the signed-in user already owns,
+     * so they're easy to spot when scanning a long tier. The owned pill on
+     * the right still encodes ownership separately. */
+    #${PAGE_ID} .bp-uhbl-row[data-owned-state="owned"] {
+      background: linear-gradient(90deg, rgba(46,178,76,0.22), rgba(46,178,76,0.10));
+      border-color: rgba(46,178,76,0.55);
+      box-shadow: inset 3px 0 0 0 rgba(46,178,76,0.85);
     }
     #${PAGE_ID} .bp-uhbl-thumb {
       position: relative; width: 80px; height: 80px;
@@ -821,6 +921,18 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-uhbl-row[data-owned-state="unowned"] .bp-owned-pill {
       background: rgba(217, 83, 79, 0.35); color: #fbb;
+    }
+    #${PAGE_ID} .bp-uhbl-media-btn {
+      flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 8px; font-size: 11px; font-weight: 600;
+      border-radius: 999px; text-decoration: none;
+      background: rgba(217, 30, 30, 0.18); color: #ff7a7a;
+      border: 1px solid rgba(217, 30, 30, 0.35);
+      line-height: 1.4; white-space: nowrap;
+    }
+    #${PAGE_ID} .bp-uhbl-media-btn:hover {
+      background: rgba(217, 30, 30, 0.32); color: #ffb0b0;
     }
 
     #${PAGE_ID} .bp-uhbl-line-game { font-size: 12px; margin-top: 2px; opacity: 0.85; }

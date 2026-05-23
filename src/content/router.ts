@@ -12,6 +12,7 @@ import * as themesPage from './themesPage';
 import * as uhblPage from './uhblPage';
 import * as searchAutocomplete from './searchAutocomplete';
 import * as addToFolderButton from './addToFolderButton';
+import * as gamePlaytimeButton from './gamePlaytimeButton';
 import * as folderTileDecorator from './folderTileDecorator';
 import * as friendLastOnlineEnhancer from './friendLastOnlineEnhancer';
 import * as terminatedProfileEnhancer from './terminatedProfileEnhancer';
@@ -20,14 +21,19 @@ import * as itemBundleEnhancer from './itemBundleEnhancer';
 import * as serverFiltersEnhancer from './serverFiltersEnhancer';
 import * as quickPlayEnhancer from './quickPlayEnhancer';
 import * as accountValueEnhancer from './accountValueEnhancer';
+import * as accountAgeEnhancer from './accountAgeEnhancer';
 import * as mutualsEnhancer from './mutualsEnhancer';
 import * as profileNotesEnhancer from './profileNotesEnhancer';
 import * as friendNicknameDecorator from './friendNicknameDecorator';
 import * as hotkeysEnhancer from './hotkeysEnhancer';
 import * as favoritesPageEnhancer from './favoritesPageEnhancer';
+import * as customizeApplier from './customizeApplier';
+import * as customizeMode from './customizeMode';
+import * as customizeMenuEntry from './customizeMenuEntry';
 
 themesPage.install();
 uhblPage.install();
+customizeMode.install();
 
 function dispatch(): void {
   void homeEnhancer.run();
@@ -36,11 +42,15 @@ function dispatch(): void {
   void subplacesEnhancer.run();
   void spentEnhancer.run();
   void robuxCashEnhancer.run();
+  // Playtime button dispatches BEFORE the folder button — both append to
+  // .favorite-follow-vote-share, so first-insert wins the leftmost slot.
+  void gamePlaytimeButton.run();
   void addToFolderButton.run();
   void folderTileDecorator.run();
   void friendLastOnlineEnhancer.run();
   void terminatedProfileEnhancer.run();
   void accountValueEnhancer.run();
+  void accountAgeEnhancer.run();
   void profileNotesEnhancer.run();
   void friendNicknameDecorator.run();
   void hotkeysEnhancer.run();
@@ -56,6 +66,9 @@ function dispatch(): void {
   leftNavEnhancer.run();
   themesPage.run();
   uhblPage.run();
+  customizeApplier.run();
+  customizeMode.run();
+  customizeMenuEntry.run();
   searchAutocomplete.run();
 }
 
@@ -63,6 +76,9 @@ observeRouteChanges(dispatch);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'sync' && changes['bloxplus.settings']) {
+    dispatch();
+  }
+  if (area === 'local' && changes['bloxplus.customizations']) {
     dispatch();
   }
 });

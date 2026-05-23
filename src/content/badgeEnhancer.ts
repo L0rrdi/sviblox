@@ -3,6 +3,7 @@ import { placeIdToUniverseId } from '@/api/games';
 import { getGameBadges, getUserBadgeAwardedDates, BadgeDetail } from '@/api/badges';
 import { getBadgeIcons } from '@/api/thumbnails';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-badges-style';
 const SECTION_ID = 'bloxplus-badges-section';
@@ -491,12 +492,6 @@ function rarityName(winRate: number | undefined): string {
   if (pct >= 5) return 'Hard';
   if (pct >= 1) return 'Insane';
   return 'Impossible';
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
-  );
 }
 
 function slug(s: string): string {

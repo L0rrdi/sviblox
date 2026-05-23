@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SviBlox Beta",
-  "version": "0.4.0",
-  "version_name": "0.4.0 beta",
+  "version": "0.5.0",
+  "version_name": "0.5.0 beta",
   "description": "BETA. Roblox home, friend stats, badges, store extras, subplaces, themes, currency, total spent, and playtime tracking.",
   "permissions": ["storage", "alarms", "unlimitedStorage"],
   "host_permissions": [
@@ -42,10 +42,19 @@
     "default_popup": "src/popup/index.html",
     "default_title": "SviBlox"
   },
-  "options_page": "src/options/index.html",
+  "options_page": "options.html",
   "web_accessible_resources": [
     {
-      "resources": ["public/icons/classicroblox.png"],
+      "resources": [
+        "public/icons/classicroblox.png",
+        "public/icons/uhbl-star-half.png",
+        "public/icons/uhbl-star-1.png",
+        "public/icons/uhbl-star-2.png",
+        "public/icons/uhbl-star-3.png",
+        "public/icons/uhbl-star-4.png",
+        "public/icons/uhbl-star-5.png",
+        "public/icons/uhbl-star-6.png"
+      ],
       "matches": ["https://*.roblox.com/*"]
     }
   ]

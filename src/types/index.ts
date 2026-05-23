@@ -48,14 +48,17 @@ export interface UserThemeEntry {
   theme: CustomTheme;
 }
 
+export interface ThemeScheduleSlot {
+  id: string;
+  label: string;
+  themeId: string;
+  /** Local 24-hour time in HH:mm format. */
+  startsAt: string;
+}
+
 export interface ThemeSchedule {
   enabled: boolean;
-  lightThemeId: string;
-  darkThemeId: string;
-  /** Local 24-hour time in HH:mm format. */
-  lightStartsAt: string;
-  /** Local 24-hour time in HH:mm format. */
-  darkStartsAt: string;
+  slots: ThemeScheduleSlot[];
 }
 
 export interface Settings {
@@ -83,6 +86,11 @@ export interface Settings {
   showGameSubplaces: boolean;
   showTotalSpent: boolean;
   showAccountValue: boolean;
+  /**
+   * Adds a non-interactive pill next to Friends/Followers/Following on
+   * profile pages showing the user's account age in years and months.
+   */
+  showAccountAge: boolean;
   showRobuxCash: boolean;
   robuxCashCurrency: 'USD' | 'GBP' | 'NOK';
   robuxCashRate: 'devex' | 'regular' | 'robloxPlus';
@@ -90,6 +98,14 @@ export interface Settings {
   showThemes: boolean;
   /** Adds the "UHBL" entry to the left nav and lets the UHBL overlay mount. */
   showUhbl: boolean;
+  /**
+   * Adds the "Customize" entry to the header settings dropdown and lets
+   * customize mode mount. Customize mode lets the user rename, hide, reorder,
+   * and re-icon nav and header items, and add new entries. Master switch —
+   * when false, applied customizations stay in storage but are not applied to
+   * the DOM.
+   */
+  showCustomize: boolean;
   /**
    * Profile notes + nicknames: editable card on other users' profiles and
    * the (nickname) cosmetic appended to displayed names site-wide.
@@ -106,6 +122,13 @@ export interface Settings {
   themeId: string;
   themeSchedule: ThemeSchedule;
   homeWidgetWindow: string;
+  /**
+   * Visually collapses the "Your Most Played" widget on the home page (only
+   * the header + eye toggle stay visible). Playtime tracking continues —
+   * this is purely a display preference. Separate from `playtimeTracker`
+   * which is the master switch for the whole feature.
+   */
+  hideMostPlayedWidget: boolean;
 }
 
 export type UhblTier = 'SS' | 'S' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'N/A';
@@ -131,6 +154,13 @@ export interface UhblBadge {
   difficulty: number;
   /** Roblox badge page URL straight from the sheet. */
   badgeUrl: string;
+  /**
+   * Optional video URL from the sheet's Media column (col E hyperlink).
+   * Curators paste YouTube / streamable / etc. links onto the media-type
+   * label; CSV export strips these, so they're pulled from the edit-view
+   * bootstrap data — see uhblSheet.ts.
+   */
+  videoUrl?: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -144,20 +174,23 @@ export const DEFAULT_SETTINGS: Settings = {
   showGameSubplaces: true,
   showTotalSpent: false,
   showAccountValue: false,
+  showAccountAge: false,
   showRobuxCash: false,
   robuxCashCurrency: 'USD',
   robuxCashRate: 'regular',
   showThemes: true,
   showUhbl: true,
+  showCustomize: false,
   showProfileNotes: false,
   gameHotkeys: {},
   themeId: 'default',
   themeSchedule: {
     enabled: false,
-    lightThemeId: 'default',
-    darkThemeId: 'dark-blue',
-    lightStartsAt: '07:00',
-    darkStartsAt: '19:00',
+    slots: [
+      { id: 'morning', label: 'Morning', themeId: 'default', startsAt: '07:00' },
+      { id: 'evening', label: 'Evening', themeId: 'dark-blue', startsAt: '19:00' },
+    ],
   },
   homeWidgetWindow: 'all',
+  hideMostPlayedWidget: false,
 };

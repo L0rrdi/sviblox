@@ -15,6 +15,7 @@
 
 import { getAuthenticatedUserId } from '@/api/users';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml, escapeAttr } from '@/util/html';
 import {
   ensureAnnotationsPrimed,
   getAnnotation,
@@ -327,14 +328,4 @@ function ensureStyle(): void {
     }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
-}
-
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
 }

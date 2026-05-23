@@ -1,0 +1,548 @@
+import { getGameInfo, getGameVotes, GameInfo, GameVote } from '@/api/games';
+import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
+import { getGameIcons } from '@/api/thumbnails';
+import { getAuthenticatedUserId } from '@/api/users';
+import { inAnyFolder } from '../folderTileDecorator';
+import { escapeHtml } from '@/util/html';
+
+export function getSectionTitle(section: HTMLElement): string {
+  for (const sel of ['h1', 'h2', 'h3', 'h4']) {
+    const el = section.querySelector(sel);
+    const t = el?.textContent?.trim();
+    if (t) return t;
+  }
+  const header = section.querySelector(
+    '.home-sort-header-container, [class*="sectionHeader"], .container-header'
+  );
+  if (header) {
+    const walker = document.createTreeWalker(header, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const t = node.textContent?.trim();
+      if (t) return t;
+    }
+  }
+  return '';
+}
+
+// =====================================================================
+//  Home page layout rearrangement
+
+export const FAVORITES_SECTION_ID = 'bloxplus-favorites-section';
+const FAVORITES_STYLE_ID = 'bloxplus-favorites-style';
+export const MY_GAMES_SECTION_ID = 'bloxplus-mygames-section';
+
+
+export function ensureFavoritesStyle(): void {
+  if (document.getElementById(FAVORITES_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = FAVORITES_STYLE_ID;
+  // Class-only selectors so both Favorites and My Games sections pick them up.
+  style.textContent = `
+    #${FAVORITES_SECTION_ID}, #${MY_GAMES_SECTION_ID} { margin: 18px 0; display: block; }
+    .bp-fav-header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      margin-bottom: 10px;
+      gap: 12px;
+    }
+    .bp-fav-header h2 {
+      margin: 0; font-size: 20px; font-weight: 600;
+    }
+    .bp-fav-header-actions {
+      display: flex; align-items: center; gap: 10px;
+      flex: 0 0 auto;
+    }
+    .bp-fav-header .bp-fav-meta {
+      font-size: 12px; opacity: 0.6;
+    }
+    .bp-fav-see-all {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 28px; padding: 0 10px; border-radius: 6px;
+      background: rgba(255,255,255,0.12);
+      color: inherit; text-decoration: none;
+      font-size: 12px; font-weight: 600;
+      border: 1px solid rgba(255,255,255,0.16);
+      box-sizing: border-box;
+    }
+    .bp-fav-see-all:hover {
+      background: rgba(255,255,255,0.18);
+      text-decoration: none;
+    }
+    .bp-fav-see-all[aria-disabled="true"] {
+      opacity: 0.45; pointer-events: none;
+    }
+    .bp-fav-scroll {
+      position: relative;
+    }
+    .bp-fav-row {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      scroll-behavior: smooth;
+      padding-bottom: 8px;
+      scrollbar-width: thin;
+      list-style: none;
+      margin: 0;
+      padding-left: 0;
+    }
+    .bp-fav-row::-webkit-scrollbar { height: 6px; }
+    .bp-fav-row::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.2); border-radius: 3px;
+    }
+    .bp-fav-tile {
+      text-decoration: none; color: inherit; display: block;
+      flex: 0 0 auto; width: 150px;
+      margin: 0;
+      padding: 0;
+    }
+    .bp-fav-tile .game-card-thumb-container { position: relative; }
+    .bp-fav-tile .game-card-container {
+      width: 150px;
+    }
+    .bp-fav-tile .game-card-link {
+      color: inherit;
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      width: 150px;
+    }
+    .bp-fav-tile img {
+      width: 150px; height: 150px; border-radius: 10px;
+      background: #2a2d35; object-fit: cover; display: block;
+      max-width: 100%; max-height: 150px;
+    }
+    .bp-fav-tile .bp-fav-name,
+    .bp-fav-tile .game-card-name {
+      font-size: 14px; font-weight: 500; margin-top: 6px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bp-fav-tile .bp-fav-creator {
+      font-size: 11px; opacity: 0.6; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .bp-fav-stats {
+      min-height: 24px; margin-top: 3px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; font-weight: 600; opacity: 0.78;
+      white-space: nowrap;
+    }
+    .bp-fav-stat {
+      display: inline-flex; align-items: center; gap: 3px;
+      min-width: 0;
+    }
+    .bp-fav-stat .icon-votes-gray,
+    .bp-fav-stat .icon-playing-counts-gray {
+      flex: 0 0 auto;
+      width: 16px; height: 16px;
+    }
+    /* Friend-tile stats restoration: when Roblox replaces a tile's stats slot
+       with a friend avatar, our extra stats sit beside the avatar in the same row. */
+    .game-card-friend-info:has(.bp-friend-tile-stats) {
+      display: flex !important;
+      align-items: center;
+      gap: 8px;
+      width: auto !important;
+    }
+    .bp-friend-tile-stats {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      opacity: 0.85;
+      white-space: nowrap;
+    }
+    .bp-friend-tile-stats .info-label {
+      flex: 0 0 auto;
+    }
+    .bp-fav-arrow {
+      position: absolute; top: 75px; transform: translateY(-50%);
+      width: 30px; height: 30px; border-radius: 50%;
+      background: rgba(0,0,0,0.55); color: #fff; border: none;
+      cursor: pointer; font-size: 16px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.15s;
+      z-index: 2;
+      font-family: inherit;
+    }
+    #${FAVORITES_SECTION_ID}:hover .bp-fav-arrow,
+    #${MY_GAMES_SECTION_ID}:hover .bp-fav-arrow {
+      opacity: 1;
+    }
+    .bp-fav-arrow:hover {
+      background: rgba(0,0,0,0.7);
+    }
+    .bp-fav-arrow.bp-fav-left { left: -8px; }
+    .bp-fav-arrow.bp-fav-right { right: -8px; }
+    .bp-fav-empty, .bp-fav-error {
+      font-size: 13px; opacity: 0.7; padding: 12px 0;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+let favoritesLoaded = false;
+let favoritesSnapshot: HomeListSnapshot | null = null;
+
+export interface HomeListSnapshot {
+  metaText: string;
+  rowHtml: string;
+  seeAllHref?: string | null;
+}
+
+// Roblox's hover state on game tiles triggers our MutationObserver, which calls
+// homeEnhancer.run() → ensureFavoritesSection() → applyHomeListSnapshot() on
+// every tick. Re-setting rowEl.innerHTML detaches every <img> and makes them
+// re-fetch, producing a visible flicker. Track the last-applied snapshot per
+// section and skip the writes when it has not changed.
+const appliedSnapshots = new WeakMap<HTMLElement, HomeListSnapshot>();
+
+export function applyHomeListSnapshot(section: HTMLElement, snapshot: HomeListSnapshot): void {
+  ensureHomeListScroller(section);
+  if (appliedSnapshots.get(section) === snapshot) return;
+  appliedSnapshots.set(section, snapshot);
+  const rowEl = section.querySelector('.bp-fav-row');
+  const metaEl = section.querySelector('.bp-fav-meta');
+  if (rowEl instanceof HTMLElement) rowEl.innerHTML = snapshot.rowHtml;
+  if (metaEl instanceof HTMLElement) metaEl.textContent = snapshot.metaText;
+  if ('seeAllHref' in snapshot) setHomeListSeeAllHref(section, snapshot.seeAllHref ?? null);
+}
+
+export function setHomeListSeeAllHref(section: HTMLElement, href: string | null): void {
+  const link = section.querySelector('.bp-fav-see-all');
+  if (!(link instanceof HTMLAnchorElement)) return;
+  if (!href) {
+    link.removeAttribute('href');
+    link.setAttribute('aria-disabled', 'true');
+    return;
+  }
+  link.href = href;
+  link.removeAttribute('aria-disabled');
+}
+
+function favoritesSeeAllUrl(userId: number): string {
+  return `https://www.roblox.com/users/${userId}/favorites#!/places`;
+}
+
+export function myGamesSeeAllUrl(userId: number): string {
+  return `https://www.roblox.com/users/${userId}/profile#!/creations`;
+}
+
+export function ensureHomeListScroller(section: HTMLElement): void {
+  const row = section.querySelector('.bp-fav-row');
+  if (!(row instanceof HTMLElement)) return;
+
+  let scroll = row.closest('.bp-fav-scroll') as HTMLElement | null;
+  if (!scroll) {
+    scroll = document.createElement('div');
+    scroll.className = 'bp-fav-scroll';
+    row.insertAdjacentElement('beforebegin', scroll);
+
+    const left = document.createElement('button');
+    left.className = 'bp-fav-arrow bp-fav-left';
+    left.type = 'button';
+    left.setAttribute('aria-label', 'Scroll left');
+    left.innerHTML = '&lsaquo;';
+
+    const right = document.createElement('button');
+    right.className = 'bp-fav-arrow bp-fav-right';
+    right.type = 'button';
+    right.setAttribute('aria-label', 'Scroll right');
+    right.innerHTML = '&rsaquo;';
+
+    scroll.append(left, row, right);
+  }
+
+  const left = scroll.querySelector('.bp-fav-left');
+  const right = scroll.querySelector('.bp-fav-right');
+  if (left instanceof HTMLButtonElement && !left.dataset.bpScrollBound) {
+    left.dataset.bpScrollBound = '1';
+    left.addEventListener('click', () => scrollHomeList(row, -1));
+  }
+  if (right instanceof HTMLButtonElement && !right.dataset.bpScrollBound) {
+    right.dataset.bpScrollBound = '1';
+    right.addEventListener('click', () => scrollHomeList(row, 1));
+  }
+}
+
+function scrollHomeList(row: HTMLElement, direction: -1 | 1): void {
+  const amount = Math.max(420, Math.floor(row.clientWidth * 0.85));
+  row.scrollBy({ left: direction * amount, behavior: 'smooth' });
+}
+
+export function updateCurrentHomeListSection(
+  sectionId: string,
+  snapshot: HomeListSnapshot,
+  fallbackSection: HTMLElement
+): void {
+  const current = document.getElementById(sectionId);
+  if (current instanceof HTMLElement) {
+    applyHomeListSnapshot(current, snapshot);
+    return;
+  }
+  applyHomeListSnapshot(fallbackSection, snapshot);
+}
+
+export function ensureFavoritesSection(): HTMLElement {
+  let section = document.getElementById(FAVORITES_SECTION_ID);
+  if (!section) {
+    section = document.createElement('div');
+    section.id = FAVORITES_SECTION_ID;
+    section.innerHTML = `
+      <div class="bp-fav-header">
+        <h2>Favorites</h2>
+        <div class="bp-fav-header-actions">
+          <span class="bp-fav-meta">SviBlox</span>
+          <a class="bp-fav-see-all" aria-disabled="true">See all</a>
+        </div>
+      </div>
+      <ul class="bp-fav-row hlist games game-cards game-tile-list home-page-carousel">
+        <li class="bp-fav-empty">Loading favorites...</li>
+      </ul>
+    `;
+  }
+
+  ensureHomeListScroller(section);
+
+  if (favoritesSnapshot) applyHomeListSnapshot(section, favoritesSnapshot);
+
+  if (!favoritesLoaded) {
+    favoritesLoaded = true; // hard one-shot, no retries even on error
+    void loadFavorites(section);
+  }
+
+  return section;
+}
+
+/** Stops any future favorites fetches for this page lifetime. */
+let favoritesDisabled = false;
+
+async function loadFavorites(section: HTMLElement): Promise<void> {
+  if (favoritesDisabled) {
+    if (favoritesSnapshot) applyHomeListSnapshot(section, favoritesSnapshot);
+    return;
+  }
+  const rowEl = section.querySelector('.bp-fav-row') as HTMLElement;
+  const metaEl = section.querySelector('.bp-fav-meta') as HTMLElement;
+
+  const userId = await getAuthenticatedUserId();
+  if (!userId) {
+    favoritesSnapshot = {
+      metaText: 'SviBlox',
+      rowHtml: `<li class="bp-fav-error">Sign in to view favorites.</li>`,
+      seeAllHref: null,
+    };
+    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    return;
+  }
+  const seeAllHref = favoritesSeeAllUrl(userId);
+  setHomeListSeeAllHref(section, seeAllHref);
+
+  let games: FavoriteGame[];
+  try {
+    games = await getFavoriteGames(userId, 50);
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    console.error('[SviBlox] favorites fetch failed:', e);
+    favoritesSnapshot = {
+      metaText: 'SviBlox',
+      rowHtml: `<li class="bp-fav-error">Failed to load favorites: ${escapeHtml(msg)}</li>`,
+      seeAllHref,
+    };
+    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    // Do NOT retry — MutationObserver fires constantly and would loop.
+    // Only transient errors (no `HTTP` prefix in message) are worth retrying.
+    if (/HTTP\s\d/.test(msg)) favoritesDisabled = true;
+    return;
+  }
+
+  if (!games.length) {
+    favoritesSnapshot = {
+      metaText: 'SviBlox',
+      rowHtml: `<li class="bp-fav-empty">No favorite games yet.</li>`,
+      seeAllHref,
+    };
+    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    return;
+  }
+
+  metaEl.textContent = `SviBlox · ${games.length} game${games.length === 1 ? '' : 's'}`;
+
+  // Render placeholders, then load icons + the same live stats Roblox shows on tiles.
+  rowEl.innerHTML = games.map(favTilePlaceholder).join('');
+
+  const universeIds = games.map((g) => g.id).filter((n): n is number => Number.isFinite(n));
+  const [icons, info, votes] = await Promise.all([
+    getGameIcons(universeIds),
+    getGameInfo(universeIds),
+    getGameVotes(universeIds),
+  ]);
+
+  favoritesSnapshot = {
+    metaText: `SviBlox · ${games.length} game${games.length === 1 ? '' : 's'}`,
+    seeAllHref,
+    rowHtml: games
+      .map((g) => favTile(g, icons.get(g.id), info.get(g.id), votes.get(g.id)))
+      .join(''),
+  };
+  updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+}
+
+/**
+ * On Roblox-native carousel tiles (Continue, Recommended, Standout, etc.),
+ * when a friend is in the experience the stats slot is replaced by
+ * `<div class="game-card-friend-info game-card-info">` showing only the friend
+ * avatar — no like % or active player count. Append our own SviBlox stats next
+ * to the avatar in that same slot. Idempotent per render: skips slots already
+ * decorated, and self-heals when Roblox re-renders the tile.
+ */
+
+interface HomeGameTileStats {
+  upVotes?: number;
+  downVotes?: number;
+  playerCount?: number;
+}
+
+export function gameStatsHtml(stats: HomeGameTileStats): string {
+  const likePercent = formatVotePercent(stats.upVotes, stats.downVotes);
+  const playerCount =
+    typeof stats.playerCount === 'number' ? formatCompactNumber(stats.playerCount) : '';
+  if (!likePercent && !playerCount) {
+    return '<div class="bp-fav-stats"></div>';
+  }
+
+  return `
+    <div class="bp-fav-stats">
+      ${
+        likePercent
+          ? `<span class="info-label icon-votes-gray"></span><span class="info-label vote-percentage-label">${likePercent}</span>`
+          : ''
+      }
+      ${
+        playerCount
+          ? `<span class="info-label icon-playing-counts-gray"></span><span class="info-label playing-counts-label">${playerCount}</span>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+export function formatVotePercent(upVotes: number | undefined, downVotes: number | undefined): string {
+  if (typeof upVotes !== 'number' || typeof downVotes !== 'number') return '';
+  const total = upVotes + downVotes;
+  if (total <= 0) return '';
+  return `${Math.round((upVotes / total) * 100)}%`;
+}
+
+interface HomeGameTile {
+  universeId?: number;
+  placeId?: number;
+  name: string;
+  href: string;
+  icon?: string;
+  stats: HomeGameTileStats;
+}
+
+export function homeGameTileHtml(tile: HomeGameTile): string {
+  const universeAttr =
+    typeof tile.universeId === 'number' ? ` data-bp-universe-id="${tile.universeId}"` : '';
+  const safeName = escapeHtml(tile.name);
+  const safeHref = escapeHtml(tile.href);
+  // The Folder (+) overlay button sits next to the thumbnail and opens the
+  // folder picker on click. data-bp-add-folder lets a single delegated
+  // listener handle every tile (see installTilesAddToFolderDelegation).
+  const folderPlusBtn =
+    typeof tile.universeId === 'number'
+      ? `<button type="button" class="bp-tile-add-folder${
+          inAnyFolder(tile.universeId) ? ' bp-in-folder' : ''
+        }"
+                 data-bp-add-folder="${tile.universeId}"
+                 data-bp-add-folder-name="${safeName}"
+                 data-bp-add-folder-place="${typeof tile.placeId === 'number' ? tile.placeId : ''}"
+                 aria-label="Add to folder"
+                 title="Add to folder">
+           <svg class="bp-folder-icon-plus" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+             <circle cx="10" cy="10" r="8" />
+             <path d="M10 6 V14 M6 10 H14" stroke-linecap="round" />
+           </svg>
+           <svg class="bp-folder-icon-check" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+             <circle cx="10" cy="10" r="8" />
+             <path d="M6 10 l3 3 l5 -6" stroke-linecap="round" stroke-linejoin="round" />
+           </svg>
+         </button>`
+      : '';
+  // Intentionally omit Roblox's friend-presence hooks (`id="<universeId>"` on
+  // the link, `data-testid="game-tile"` on the container, `data-testid="game-tile-stats"`
+  // on the stats div). Roblox's home script otherwise locates our tiles by those
+  // attributes and injects a friend avatar into `.game-card-info`, wiping our stats.
+  return `
+    <li class="list-item game-card game-tile bp-fav-tile"${universeAttr}>
+      <div class="game-card-container">
+        <a class="game-card-link" href="${safeHref}" tabindex="0">
+          <div class="game-card-thumb-container">
+            <span class="thumbnail-2d-container game-tile-thumb">
+              <img src="${escapeHtml(tile.icon ?? '')}" alt="${safeName}" title="${safeName}" loading="lazy" />
+            </span>
+            ${folderPlusBtn}
+          </div>
+          <div class="game-card-name game-name-title" title="${safeName}">${safeName}</div>
+          ${gameStatsHtml(tile.stats)}
+        </a>
+      </div>
+    </li>
+  `;
+}
+
+export function gameHref(placeId: number | undefined, universeId: number): string {
+  return placeId
+    ? `https://www.roblox.com/games/${placeId}`
+    : `https://www.roblox.com/games/?Keyword=${universeId}`;
+}
+
+function favTilePlaceholder(g: FavoriteGame): string {
+  return homeGameTileHtml({
+    universeId: g.id,
+    placeId: g.rootPlace?.id,
+    name: g.name,
+    href: gameHref(g.rootPlace?.id, g.id),
+    stats: {
+      upVotes: g.totalUpVotes,
+      downVotes: g.totalDownVotes,
+      playerCount: g.playerCount,
+    },
+  });
+}
+
+function favTile(
+  g: FavoriteGame,
+  icon: string | undefined,
+  info: GameInfo | undefined,
+  vote: GameVote | undefined
+): string {
+  return homeGameTileHtml({
+    universeId: g.id,
+    placeId: g.rootPlace?.id ?? info?.rootPlaceId,
+    name: g.name,
+    href: gameHref(g.rootPlace?.id ?? info?.rootPlaceId, g.id),
+    icon,
+    stats: {
+      upVotes: g.totalUpVotes ?? vote?.upVotes,
+      downVotes: g.totalDownVotes ?? vote?.downVotes,
+      playerCount: g.playerCount ?? info?.playing,
+    },
+  });
+}
+
+export function formatCompactNumber(n: number): string {
+  if (n >= 1e9) return formatCompactUnit(n, 1e9, 'B');
+  if (n >= 1e6) return formatCompactUnit(n, 1e6, 'M');
+  if (n >= 1e3) return formatCompactUnit(n, 1e3, 'K');
+  return String(n);
+}
+
+// =====================================================================
+//  Folders
+
+function formatCompactUnit(n: number, divisor: number, suffix: string): string {
+  return (n / divisor).toFixed(1).replace(/\.0$/, '') + suffix;
+}

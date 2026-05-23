@@ -1,6 +1,7 @@
 import { getUniversePlaces, placeIdToUniverseId, UniversePlace } from '@/api/games';
 import { getPlaceIcons } from '@/api/thumbnails';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-subplaces-style';
 const SECTION_ID = 'bloxplus-subplaces-section';
@@ -397,10 +398,4 @@ function ensureStyle(): void {
     }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
-  );
 }

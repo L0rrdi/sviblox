@@ -16,6 +16,7 @@ import { getSettings, onSettingsChanged } from '@/storage/settingsStore';
 import { getFolders, onFoldersChanged, FoldersState, FolderGame } from '@/storage/foldersStore';
 import { getAuthenticatedUserId } from '@/api/users';
 import { getGameInfo } from '@/api/games';
+import { escapeHtml } from '@/util/html';
 import {
   HOTKEY_DESTINATIONS,
   HOTKEY_DESTINATION_BY_ID,
@@ -357,12 +358,6 @@ function ensureOverlayStyle(): void {
     }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
 }
 
 // Re-export the destination list for the popup so popup doesn't need a

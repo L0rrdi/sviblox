@@ -16,6 +16,13 @@ interface PresetTheme {
   bgImage?: string;
 }
 
+// `classic-2016` is intentionally dev-only: the inline conditional spread
+// drops it from production bundles via Vite tree-shaking when
+// `import.meta.env.DEV` is statically false. `npm run dev` keeps it; the
+// `npm run build` (store) bundle excludes it from PRESETS entirely, so it
+// disappears from the themes page UI AND from buildCss lookups (any leftover
+// `themeId === 'classic-2016'` in user settings silently falls back because
+// `PRESETS.find(...)` returns undefined → empty CSS → default styling).
 const PRESETS: PresetTheme[] = [
   { id: 'default', name: 'Default' },
   {
@@ -38,16 +45,20 @@ const PRESETS: PresetTheme[] = [
       accent: '#ffffff',
     },
   },
-  {
-    id: 'classic-2016',
-    name: 'Classic 2016',
-    vars: {
-      background: '#f4f4f4',
-      nav: '#013a87',
-      text: '#191919',
-      accent: '#00a2ff',
-    },
-  },
+  ...(import.meta.env.DEV
+    ? [
+        {
+          id: 'classic-2016',
+          name: 'Classic 2016',
+          vars: {
+            background: '#f4f4f4',
+            nav: '#013a87',
+            text: '#191919',
+            accent: '#00a2ff',
+          },
+        } as PresetTheme,
+      ]
+    : []),
 ];
 
 export function getPresets(): PresetTheme[] {
@@ -1076,7 +1087,7 @@ function getEraLayoutCss(themeId: string): string {
     }
     .robux-cell h4:after { content: " ROBUX"; }
     .robux-cell h4:hover { text-decoration: underline; }
-    ${themeId === 'classic-2016' ? get2016OverlayCss() : ''}
+    ${import.meta.env.DEV && themeId === 'classic-2016' ? get2016OverlayCss() : ''}
   `;
 }
 
@@ -3571,7 +3582,10 @@ async function applyCurrent(): Promise<void> {
   const effectiveThemeId = isBuiltIn ? settings.themeId : 'custom';
   style.textContent = buildCss(effectiveThemeId, custom);
   applyBackgroundImage(custom, effectiveThemeId);
-  if (settings.themeId === 'classic-2016') {
+  // Production builds drop `classic-2016` from PRESETS; gate the DOM tweaks
+  // on the same DEV flag so a stray themeId from synced storage can't trigger
+  // a half-broken state (palette gone, era DOM hooks active).
+  if (import.meta.env.DEV && settings.themeId === 'classic-2016') {
     activateClassic2016Tweaks();
   } else {
     deactivateClassic2016Tweaks();

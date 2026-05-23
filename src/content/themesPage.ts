@@ -36,7 +36,8 @@ import {
   resolveThemeSchedule,
   sanitizeThemeSchedule,
 } from '@/storage/themeSchedule';
-import { CustomTheme, UserThemeEntry } from '@/types';
+import { CustomTheme, ThemeSchedule, UserThemeEntry } from '@/types';
+import { escapeHtml } from '@/util/html';
 
 const PAGE_ID = 'bloxplus-themes-page';
 const STYLE_ID = 'bloxplus-themes-page-style';
@@ -154,15 +155,30 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-bg-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 
     #${PAGE_ID} .bp-schedule-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      display: flex;
+      flex-direction: column;
       gap: 12px;
+    }
+    #${PAGE_ID} .bp-schedule-slot {
+      display: grid;
+      grid-template-columns: minmax(110px, 1fr) minmax(150px, 1.4fr) 108px auto;
+      gap: 8px;
+      align-items: end;
+    }
+    @media (max-width: 720px) {
+      #${PAGE_ID} .bp-schedule-slot {
+        grid-template-columns: 1fr;
+      }
+      #${PAGE_ID} .bp-schedule-remove {
+        width: 100%;
+      }
     }
     #${PAGE_ID} .bp-schedule-field {
       display: flex; flex-direction: column; gap: 6px;
       font-size: 13px;
     }
     #${PAGE_ID} .bp-schedule-field select,
+    #${PAGE_ID} .bp-schedule-field input[type="text"],
     #${PAGE_ID} .bp-schedule-field input[type="time"] {
       padding: 7px 8px;
       background: #1a1d24; color: inherit;
@@ -173,6 +189,10 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-schedule-toggle {
       display: inline-flex; gap: 8px; align-items: center;
       font-size: 13px; margin-bottom: 14px;
+    }
+    #${PAGE_ID} .bp-schedule-remove {
+      min-width: 34px;
+      padding-inline: 0;
     }
     #${PAGE_ID} .bp-schedule-note {
       font-size: 12px; opacity: 0.7; margin-top: 10px; min-height: 16px;
@@ -382,10 +402,6 @@ function openConfirmModal(opts: { title: string; body: string; confirmLabel: str
   });
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}
-
 // ── Render ────────────────────────────────────────────────────────────────
 
 async function render(page: HTMLElement): Promise<void> {
@@ -398,11 +414,18 @@ async function render(page: HTMLElement): Promise<void> {
   const schedule = sanitizeThemeSchedule(settings.themeSchedule, userThemes);
   const scheduleResolution = resolveThemeSchedule({ ...settings, themeSchedule: schedule }, userThemes);
   const scheduleChoices = getThemeScheduleChoices(userThemes);
-  const scheduleSlotKey = scheduleResolution?.slot === 'dark' ? 'darkThemeId' : 'lightThemeId';
+  const activeScheduleSlotId = scheduleResolution?.slotId ?? schedule.slots[0]?.id;
   const activationPatch = (themeId: string) => ({
     themeId,
     ...(schedule.enabled
-      ? { themeSchedule: { ...schedule, [scheduleSlotKey]: themeId } }
+      ? {
+          themeSchedule: {
+            ...schedule,
+            slots: schedule.slots.map((slot) =>
+              slot.id === activeScheduleSlotId ? { ...slot, themeId } : slot
+            ),
+          },
+        }
       : {}),
   });
 
@@ -419,9 +442,33 @@ async function render(page: HTMLElement): Promise<void> {
       })
       .join('');
 
+  const scheduleRows = schedule.slots
+    .map(
+      (slot, index) => `
+        <div class="bp-schedule-slot" data-schedule-slot="${escapeHtml(slot.id)}">
+          <label class="bp-schedule-field">Name
+            <input type="text" value="${escapeHtml(slot.label)}" maxlength="32" data-schedule-label />
+          </label>
+          <label class="bp-schedule-field">Preset
+            <select data-schedule-theme>
+              ${scheduleOption(slot.themeId)}
+            </select>
+          </label>
+          <label class="bp-schedule-field">Starts
+            <input type="time" value="${escapeHtml(slot.startsAt)}" data-schedule-time />
+          </label>
+          <button class="bp-btn bp-schedule-remove" type="button" title="Remove slot"
+                  data-schedule-remove="${escapeHtml(slot.id)}" ${schedule.slots.length <= 2 ? 'disabled' : ''}>
+            ${index + 1 > 2 ? '-' : 'x'}
+          </button>
+        </div>
+      `
+    )
+    .join('');
+
   const scheduleNote =
     schedule.enabled && scheduleResolution
-      ? `Currently using ${scheduleChoices.find((choice) => choice.id === scheduleResolution.themeId)?.name ?? scheduleResolution.themeId} until ${scheduleResolution.slot === 'light' ? schedule.darkStartsAt : schedule.lightStartsAt}.`
+      ? `Currently using ${scheduleChoices.find((choice) => choice.id === scheduleResolution.themeId)?.name ?? scheduleResolution.themeId} (${scheduleResolution.slotLabel}) until ${scheduleResolution.nextStartsAt}.`
       : 'Schedule is off. Your selected preset stays active until you change it.';
 
   const colorRow = (
@@ -538,22 +585,10 @@ async function render(page: HTMLElement): Promise<void> {
         Enable automatic theme schedule
       </label>
       <div class="bp-schedule-grid">
-        <label class="bp-schedule-field">Light preset
-          <select data-schedule-theme="lightThemeId">
-            ${scheduleOption(schedule.lightThemeId)}
-          </select>
-        </label>
-        <label class="bp-schedule-field">Dark preset
-          <select data-schedule-theme="darkThemeId">
-            ${scheduleOption(schedule.darkThemeId)}
-          </select>
-        </label>
-        <label class="bp-schedule-field">Light starts
-          <input type="time" value="${escapeHtml(schedule.lightStartsAt)}" data-schedule-time="lightStartsAt" />
-        </label>
-        <label class="bp-schedule-field">Dark starts
-          <input type="time" value="${escapeHtml(schedule.darkStartsAt)}" data-schedule-time="darkStartsAt" />
-        </label>
+        ${scheduleRows}
+      </div>
+      <div class="bp-actions">
+        <button class="bp-btn" type="button" data-schedule-add>Add slot</button>
       </div>
       <div class="bp-schedule-note">${escapeHtml(scheduleNote)}</div>
     </div>
@@ -828,40 +863,84 @@ async function render(page: HTMLElement): Promise<void> {
     markDirty();
   });
 
-  page.querySelector<HTMLInputElement>('[data-schedule-enabled]')?.addEventListener('change', async (e) => {
-    const enabled = (e.target as HTMLInputElement).checked;
-    const nextSchedule = { ...schedule, enabled };
-    const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
+  const saveSchedule = async (nextSchedule: ThemeSchedule): Promise<void> => {
+    const sanitized = sanitizeThemeSchedule(nextSchedule, userThemes);
+    const resolution = resolveThemeSchedule({ ...settings, themeSchedule: sanitized }, userThemes);
     await setSettings({
-      themeSchedule: nextSchedule,
-      ...(enabled && resolution ? { themeId: resolution.themeId } : {}),
+      themeSchedule: sanitized,
+      ...(sanitized.enabled && resolution ? { themeId: resolution.themeId } : {}),
     });
     await render(page);
+  };
+
+  page.querySelector<HTMLInputElement>('[data-schedule-enabled]')?.addEventListener('change', async (e) => {
+    const enabled = (e.target as HTMLInputElement).checked;
+    await saveSchedule({ ...schedule, enabled });
   });
 
   for (const select of page.querySelectorAll<HTMLSelectElement>('[data-schedule-theme]')) {
     select.addEventListener('change', async () => {
-      const key = select.dataset.scheduleTheme as 'lightThemeId' | 'darkThemeId';
-      const nextSchedule = { ...schedule, [key]: select.value };
-      const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
-      await setSettings({
-        themeSchedule: nextSchedule,
-        ...(nextSchedule.enabled && resolution ? { themeId: resolution.themeId } : {}),
+      const slotId = select.closest<HTMLElement>('[data-schedule-slot]')?.dataset.scheduleSlot;
+      if (!slotId) return;
+      await saveSchedule({
+        ...schedule,
+        slots: schedule.slots.map((slot) =>
+          slot.id === slotId ? { ...slot, themeId: select.value } : slot
+        ),
       });
-      await render(page);
     });
   }
 
   for (const input of page.querySelectorAll<HTMLInputElement>('[data-schedule-time]')) {
     input.addEventListener('change', async () => {
-      const key = input.dataset.scheduleTime as 'lightStartsAt' | 'darkStartsAt';
-      const nextSchedule = { ...schedule, [key]: input.value || schedule[key] };
-      const resolution = resolveThemeSchedule({ ...settings, themeSchedule: nextSchedule }, userThemes);
-      await setSettings({
-        themeSchedule: nextSchedule,
-        ...(nextSchedule.enabled && resolution ? { themeId: resolution.themeId } : {}),
+      const slotId = input.closest<HTMLElement>('[data-schedule-slot]')?.dataset.scheduleSlot;
+      if (!slotId) return;
+      await saveSchedule({
+        ...schedule,
+        slots: schedule.slots.map((slot) =>
+          slot.id === slotId ? { ...slot, startsAt: input.value || slot.startsAt } : slot
+        ),
       });
-      await render(page);
+    });
+  }
+
+  for (const input of page.querySelectorAll<HTMLInputElement>('[data-schedule-label]')) {
+    input.addEventListener('change', async () => {
+      const slotId = input.closest<HTMLElement>('[data-schedule-slot]')?.dataset.scheduleSlot;
+      if (!slotId) return;
+      await saveSchedule({
+        ...schedule,
+        slots: schedule.slots.map((slot) =>
+          slot.id === slotId ? { ...slot, label: input.value.trim() || slot.label } : slot
+        ),
+      });
+    });
+  }
+
+  page.querySelector('[data-schedule-add]')?.addEventListener('click', async () => {
+    const nextIndex = schedule.slots.length + 1;
+    await saveSchedule({
+      ...schedule,
+      slots: [
+        ...schedule.slots,
+        {
+          id: `slot-${Date.now().toString(36)}`,
+          label: `Slot ${nextIndex}`,
+          themeId: schedule.slots[schedule.slots.length - 1]?.themeId ?? 'default',
+          startsAt: `${String((7 + (nextIndex - 1) * 4) % 24).padStart(2, '0')}:00`,
+        },
+      ],
+    });
+  });
+
+  for (const btn of page.querySelectorAll<HTMLButtonElement>('[data-schedule-remove]')) {
+    btn.addEventListener('click', async () => {
+      const slotId = btn.dataset.scheduleRemove;
+      if (!slotId || schedule.slots.length <= 2) return;
+      await saveSchedule({
+        ...schedule,
+        slots: schedule.slots.filter((slot) => slot.id !== slotId),
+      });
     });
   }
 

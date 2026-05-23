@@ -2,6 +2,7 @@ import { getDeveloperProducts, DeveloperProduct } from '@/api/developerProducts'
 import { placeIdToUniverseId } from '@/api/games';
 import { getDeveloperProductIcons } from '@/api/thumbnails';
 import { getSettings } from '@/storage/settingsStore';
+import { escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-dev-products-style';
 const SECTION_ID = 'bloxplus-dev-products-section';
@@ -381,10 +382,4 @@ function ensureStyle(): void {
 
 function formatNumber(n: number): string {
   return new Intl.NumberFormat().format(n);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
-  );
 }

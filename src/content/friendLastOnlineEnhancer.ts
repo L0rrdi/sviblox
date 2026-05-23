@@ -8,6 +8,7 @@ import { getAuthenticatedUserId } from '@/api/users';
 import { getMyFriends } from '@/api/friends';
 import { getUserPresence, UserPresence } from '@/api/presence';
 import { getLastSeenForUser, recordLastSeen, LastSeenRow } from '@/storage/lastSeenStore';
+import { escapeHtml } from '@/util/html';
 
 const CHIP_ID = 'bloxplus-friend-last-online';
 const STYLE_ID = 'bloxplus-friend-last-online-style';
@@ -172,10 +173,4 @@ function ensureStyle(): void {
     .bp-last-online-dot.bp-last-online-offline { background: #9ca3af; }
   `;
   document.head.appendChild(style);
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
-  );
 }
