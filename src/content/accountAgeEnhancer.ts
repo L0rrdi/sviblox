@@ -70,27 +70,25 @@ function render(userId: number, label: string): void {
   if (!row) return;
   if (document.getElementById(PILL_ID)) return;
 
-  const a = document.createElement('a');
-  a.id = PILL_ID;
-  a.dataset.bpUserId = String(userId);
-  a.className = PILL_ANCHOR_CLASS;
-  a.setAttribute('aria-disabled', 'false');
-  a.setAttribute('role', 'note');
-  a.style.textDecoration = 'none';
-  a.style.cursor = 'default';
-  a.title = label;
-  a.addEventListener('click', (e) => e.preventDefault());
+  // Span, not anchor — this pill is display-only and screen readers
+  // shouldn't announce it as a link.
+  const pill = document.createElement('span');
+  pill.id = PILL_ID;
+  pill.dataset.bpUserId = String(userId);
+  pill.className = PILL_ANCHOR_CLASS;
+  pill.style.cursor = 'default';
+  pill.title = label;
 
   const overlay = document.createElement('div');
   overlay.setAttribute('role', 'presentation');
   overlay.className = PILL_OVERLAY_CLASS;
 
-  const span = document.createElement('span');
-  span.className = PILL_LABEL_CLASS;
-  span.textContent = label;
+  const text = document.createElement('span');
+  text.className = PILL_LABEL_CLASS;
+  text.textContent = label;
 
-  a.append(overlay, span);
-  row.appendChild(a);
+  pill.append(overlay, text);
+  row.appendChild(pill);
 }
 
 function findStatsRow(): HTMLElement | null {

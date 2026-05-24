@@ -58,14 +58,27 @@ function ensureStyle(): void {
     [data-bp-custom-button-id] > a:hover {
       background: rgba(255,255,255,0.06);
     }
+    /* Placeholder shown when a custom button has no chosen icon. Was a
+     * filled colored square (background: currentColor) which read as a real
+     * icon and made users think their button rendered broken. Now a faint
+     * dashed circle + centered "+" glyph so it visibly says "add an icon". */
     [data-bp-custom-button-id] .bp-nav-icon {
       width: 24px;
       height: 24px;
       flex: 0 0 auto;
-      display: inline-block;
-      background: currentColor;
-      border-radius: 5px;
-      opacity: 0.55;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px dashed currentColor;
+      border-radius: 50%;
+      color: inherit;
+      opacity: 0.45;
+      font: 600 14px/1 inherit;
+    }
+    [data-bp-custom-button-id] .bp-nav-icon::before {
+      content: '+';
+      line-height: 1;
     }
     .bp-animated-nav-icon {
       width: 24px;
@@ -76,6 +89,24 @@ function ensureStyle(): void {
     }
     .bp-animated-nav-icon * {
       vector-effect: non-scaling-stroke;
+    }
+    /* Soft-hide: visible-but-faded representation of 'hidden: true' items
+     * while in customize mode, so they can be located and un-hidden via the
+     * drawer. A subtle strike-through diagonal makes the state obvious. */
+    .bp-cust-soft-hidden {
+      opacity: 0.30;
+      position: relative;
+    }
+    .bp-cust-soft-hidden::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        135deg,
+        transparent 0 8px,
+        rgba(255, 130, 120, 0.18) 8px 9px
+      );
     }
     .bp-animated-chart-base {
       transform-box: view-box;
@@ -205,14 +236,22 @@ async function runAsync(): Promise<void> {
     restoreAll();
     return;
   }
+  // Soft-hide is a customize-mode-only affordance — outside the mode,
+  // `hidden` always means `display: none`.
+  const inCustomizeMode = location.hash.replace(/^#/, '') === 'bloxplus-customize';
+  const softHide = inCustomizeMode && settings.customizeShowHiddenInMode !== false;
   const spec = getCachedCustomizations();
   syncCustomButtons(spec.customButtons ?? []);
   let targets = tagAll();
-  applyOrder(targets, spec.leftNavOrder);
-  targets = tagAll();
+  // applyOrder rearranges children but does not change membership — the
+  // `targets` array's elements are still the same HTMLElements after the
+  // reorder, just in a different DOM order. Only retag when applyOrder
+  // signals it actually mutated the parent (signals via the boolean return).
+  const reordered = applyOrder(targets, spec.leftNavOrder);
+  if (reordered) targets = tagAll();
   for (const target of targets) {
     const edit: ElementEdit | undefined = spec.entries[target.id];
-    applyHidden(target.el, edit?.hidden);
+    applyHidden(target.el, edit?.hidden, softHide);
     applyText(target.el, cleanTextForTarget(target.el, edit?.text));
     // Custom buttons own their icon state on the CustomButton record and are
     // hydrated by syncCustomButtons above. Skip applyIcon for them — otherwise
@@ -229,8 +268,12 @@ function cleanTextForTarget(li: HTMLElement, text: string | undefined): string |
   return text;
 }
 
-function applyOrder(targets: ReturnType<typeof tagAll>, order: string[] | undefined): void {
-  if (!order?.length) return;
+/**
+ * Returns true if at least one parent had its children reordered. The applier
+ * uses this signal to skip a redundant second `tagAll()` when nothing moved.
+ */
+function applyOrder(targets: ReturnType<typeof tagAll>, order: string[] | undefined): boolean {
+  if (!order?.length) return false;
   const rank = new Map(order.map((id, i) => [id, i]));
   const byParent = new Map<HTMLElement, typeof targets>();
   for (const target of targets) {
@@ -241,6 +284,7 @@ function applyOrder(targets: ReturnType<typeof tagAll>, order: string[] | undefi
     byParent.set(parent, group);
   }
 
+  let mutated = false;
   for (const [parent, group] of byParent) {
     const sorted = [...group].sort((a, b) => {
       const ar = rank.get(a.id);
@@ -252,7 +296,9 @@ function applyOrder(targets: ReturnType<typeof tagAll>, order: string[] | undefi
     });
     if (sorted.every((target, i) => target.el === group[i].el)) continue;
     for (const target of sorted) parent.appendChild(target.el);
+    mutated = true;
   }
+  return mutated;
 }
 
 function syncCustomButtons(buttons: CustomButton[]): void {
@@ -351,15 +397,28 @@ function hydrateCustomButton(li: HTMLElement, button: CustomButton): void {
   if (label.textContent !== button.label) label.textContent = button.label;
 }
 
-function applyHidden(li: HTMLElement, hidden: boolean | undefined): void {
+function applyHidden(li: HTMLElement, hidden: boolean | undefined, softHide: boolean): void {
   if (hidden) {
-    if (!li.dataset.bpCustHidden) {
-      li.dataset.bpCustHidden = '1';
-      li.style.display = 'none';
+    if (softHide) {
+      // Visible at low opacity — user can still click it to un-hide.
+      if (li.dataset.bpCustHidden) {
+        li.style.display = '';
+        delete li.dataset.bpCustHidden;
+      }
+      li.classList.add('bp-cust-soft-hidden');
+    } else {
+      li.classList.remove('bp-cust-soft-hidden');
+      if (!li.dataset.bpCustHidden) {
+        li.dataset.bpCustHidden = '1';
+        li.style.display = 'none';
+      }
     }
-  } else if (li.dataset.bpCustHidden) {
-    li.style.display = '';
-    delete li.dataset.bpCustHidden;
+  } else {
+    li.classList.remove('bp-cust-soft-hidden');
+    if (li.dataset.bpCustHidden) {
+      li.style.display = '';
+      delete li.dataset.bpCustHidden;
+    }
   }
 }
 
@@ -456,6 +515,9 @@ function restoreAll(): void {
   for (const li of document.querySelectorAll<HTMLElement>('[data-bp-cust-hidden]')) {
     li.style.display = '';
     delete li.dataset.bpCustHidden;
+  }
+  for (const li of document.querySelectorAll<HTMLElement>('.bp-cust-soft-hidden')) {
+    li.classList.remove('bp-cust-soft-hidden');
   }
   for (const lbl of document.querySelectorAll<HTMLElement>('[data-bp-cust-orig-text]')) {
     lbl.textContent = lbl.dataset.bpCustOrigText ?? '';

@@ -1,14 +1,23 @@
 import { getSettings } from '@/storage/settingsStore';
 import { accumulateTrackedSeconds } from '@/storage/playtimeStore';
 import { recordLastSeen, LastSeenMap } from '@/storage/lastSeenStore';
+import { cachePruneExpired } from '@/storage/cacheStore';
 
 const ALARM_NAME = 'bloxplus.presenceCheck';
+const CACHE_PRUNE_ALARM = 'bloxplus.cachePrune';
 const POLL_INTERVAL_MIN = 1; // chrome.alarms minimum
+const CACHE_PRUNE_INTERVAL_MIN = 60; // hourly
 const AUTH_USER_CACHE_MS = 5 * 60_000;
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[SviBlox] installed');
   void ensureAlarm();
+  // Prune once on install to catch up any historical buildup from
+  // pre-pruning builds — users upgrading to 0.6 with ~18 MB of stale
+  // cache see it disappear on first launch.
+  void cachePruneExpired().then((n) => {
+    if (n) console.log('[SviBlox] cache prune on install:', n, 'entries');
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
@@ -93,12 +102,21 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     void poll();
     void pollFriendsLastSeen();
   }
+  if (alarm.name === CACHE_PRUNE_ALARM) {
+    void cachePruneExpired().then((n) => {
+      if (n) console.log('[SviBlox] cache prune:', n, 'entries');
+    });
+  }
 });
 
 async function ensureAlarm(): Promise<void> {
   const existing = await chrome.alarms.get(ALARM_NAME);
   if (!existing) {
     await chrome.alarms.create(ALARM_NAME, { periodInMinutes: POLL_INTERVAL_MIN });
+  }
+  const existingPrune = await chrome.alarms.get(CACHE_PRUNE_ALARM);
+  if (!existingPrune) {
+    await chrome.alarms.create(CACHE_PRUNE_ALARM, { periodInMinutes: CACHE_PRUNE_INTERVAL_MIN });
   }
 }
 

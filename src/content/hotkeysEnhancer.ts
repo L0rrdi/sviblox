@@ -105,15 +105,18 @@ function onKeyDown(e: KeyboardEvent): void {
   void executeJump(destId, dest);
 }
 
-function onKeyUp(): void {
-  // Hold-not-toggle semantics: any keyup hides the overlay. Most natural for
-  // Shift+\\ since releasing either key fires keyup.
-  if (overlayVisible) {
-    hideOverlay();
-    // Same focus-ring cleanup as after a jump — keyup flips :focus-visible
-    // back on for whatever the browser thinks is focused.
-    blurActive();
-  }
+function onKeyUp(e: KeyboardEvent): void {
+  if (!overlayVisible) return;
+  // Hold-not-toggle semantics, but only dismiss when an overlay-relevant
+  // key is released. Without this, tapping any letter while the overlay
+  // is up would dismiss it on that letter's keyup. The overlay key (`|`)
+  // requires Shift+\\ on US layouts, so either Shift, \\, or | releasing
+  // counts as "no longer holding |".
+  if (e.key !== HELP_OVERLAY_KEY && e.key !== 'Shift' && e.key !== '\\') return;
+  hideOverlay();
+  // Same focus-ring cleanup as after a jump — keyup flips :focus-visible
+  // back on for whatever the browser thinks is focused.
+  blurActive();
 }
 
 function blurActive(): void {
@@ -186,14 +189,19 @@ function findFirst(selectors: readonly string[]): HTMLElement | null {
   return null;
 }
 
-let flashTimer: number | undefined;
+// Per-element timer so a second jump within 900 ms doesn't strand the first
+// element with a stuck purple ring (single shared timer used to overwrite
+// the prior one but only remove the class from the *latest* target).
+const flashTimers = new WeakMap<HTMLElement, number>();
 function flashHighlight(el: HTMLElement): void {
+  const prior = flashTimers.get(el);
+  if (prior !== undefined) window.clearTimeout(prior);
   el.classList.add('bp-hotkey-flash');
-  if (flashTimer !== undefined) window.clearTimeout(flashTimer);
-  flashTimer = window.setTimeout(() => {
+  const t = window.setTimeout(() => {
     el.classList.remove('bp-hotkey-flash');
-    flashTimer = undefined;
+    flashTimers.delete(el);
   }, 900);
+  flashTimers.set(el, t);
 }
 
 function showOverlay(): void {

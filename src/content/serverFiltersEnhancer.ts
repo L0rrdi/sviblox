@@ -11,6 +11,8 @@
  * full `ping`, `playing`, `maxPlayers` for each server. No extra API call.
  */
 
+import { cacheGet, cacheSet } from '@/storage/cacheStore';
+
 const STYLE_ID = 'bloxplus-server-filters-style';
 const FILTER_BTN_ID = 'bloxplus-server-filters-btn';
 const FILTER_MENU_ID = 'bloxplus-server-filters-menu';
@@ -18,6 +20,12 @@ const TILE_DECORATED = 'data-bp-tile-decorated';
 const SORT_STATE_KEY = '__bpServerSortKey';
 const OBSERVER_FLAG = '__bpServerFiltersObserver';
 const BRIDGE_FLAG = '__bpFiberBridgeInstalled';
+
+const AVATAR_CACHE_TTL_MS = 24 * 60 * 60_000;
+// Monotonic token bumped on every applySort start AND every clearFilter.
+// Lets stale fetches detect that they've been superseded / cancelled and
+// bail before writing into a sviList that may no longer be in the DOM.
+let sortSeq = 0;
 
 type SortKey = 'available' | 'shuffle' | 'best-ping';
 
@@ -174,6 +182,7 @@ async function applySort(key: SortKey): Promise<void> {
   const nativeList = document.getElementById('rbx-public-game-server-item-container');
   if (!nativeList) return;
 
+  const mySeq = ++sortSeq;
   const sviList = ensureSviList(nativeList);
   hideNativeList(nativeList);
   ensureClearButton();
@@ -184,9 +193,11 @@ async function applySort(key: SortKey): Promise<void> {
   try {
     servers = await fetchServersUpTo(placeId, FETCH_PAGES * FETCH_PAGE_LIMIT);
   } catch (e) {
+    if (sortSeq !== mySeq) return; // superseded / cancelled
     showError(sviList, `Couldn't fetch servers (${(e as Error).message}).`);
     return;
   }
+  if (sortSeq !== mySeq) return;
   if (!servers.length) {
     showError(sviList, 'No public servers found.');
     return;
@@ -439,6 +450,7 @@ function ensureClearButton(): void {
 function clearFilter(): void {
   const nativeList = document.getElementById('rbx-public-game-server-item-container');
   if (!nativeList) return;
+  sortSeq++; // invalidate any in-flight applySort fetch
   flag(nativeList, null);
   document.getElementById(SVI_LIST_ID)?.remove();
   showNativeList(nativeList);
@@ -529,11 +541,21 @@ async function hydratePlayerAvatars(
     }
   }
   if (!tokenList.length) return;
+
+  // Hit the per-token cache first so repeated sorts on the same servers
+  // (and re-visits within 24h) don't refetch what we already have.
+  const urls = new Map<string, string>();
+  const uncached: string[] = [];
+  await Promise.all(tokenList.map(async (token) => {
+    const cached = await cacheGet<string>(`playerHeadshot:${token}`);
+    if (cached) urls.set(token, cached);
+    else uncached.push(token);
+  }));
+
   // Roblox's batch thumbnail endpoint rejects requests with >100 entries.
   const BATCH_MAX = 100;
-  const urls = new Map<string, string>();
-  for (let start = 0; start < tokenList.length; start += BATCH_MAX) {
-    const slice = tokenList.slice(start, start + BATCH_MAX);
+  for (let start = 0; start < uncached.length; start += BATCH_MAX) {
+    const slice = uncached.slice(start, start + BATCH_MAX);
     const body = slice.map((token, i) => ({
       requestId: String(i),
       type: 'AvatarHeadShot',
@@ -554,7 +576,10 @@ async function hydratePlayerAvatars(
         const idx = Number(row.requestId);
         if (!Number.isFinite(idx) || idx < 0 || idx >= slice.length) continue;
         if (row.state === 'Completed' && row.imageUrl) {
-          urls.set(slice[idx], row.imageUrl);
+          const token = slice[idx];
+          urls.set(token, row.imageUrl);
+          // Fire and forget — cache write doesn't gate rendering.
+          void cacheSet(`playerHeadshot:${token}`, row.imageUrl, AVATAR_CACHE_TTL_MS);
         }
       }
     } catch {

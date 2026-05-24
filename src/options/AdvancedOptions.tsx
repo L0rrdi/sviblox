@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { getGameInfo } from '@/api/games';
 import { getPlaytime, setPlaytime } from '@/storage/playtimeStore';
+import { getSettings, setSettings } from '@/storage/settingsStore';
+import { getDefaultThemeSchedule } from '@/storage/themeSchedule';
 import { GamePlaytimeEntry } from '@/types';
 
 const BACKUP_LOCAL_KEYS = [
@@ -45,6 +47,16 @@ export function AdvancedOptions() {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  // Deep-link handling. The popup's storage-full warning opens
+  // `options.html#storage`, and the user can land on any of these section
+  // hashes from a bookmark. Scroll once on mount.
+  useEffect(() => {
+    const hash = location.hash.replace(/^#/, '');
+    if (!hash) return;
+    // Defer one tick so the section is in the DOM.
+    requestAnimationFrame(() => scrollToSection(hash));
+  }, []);
+
   return (
     <div className="adv-page">
       <style>{advancedCss}</style>
@@ -52,6 +64,9 @@ export function AdvancedOptions() {
         <div className="adv-brand">SviBlox</div>
         <button className="adv-nav-button" type="button" onClick={() => scrollToSection('data')}>
           Data & backups
+        </button>
+        <button className="adv-nav-button" type="button" onClick={() => scrollToSection('storage')}>
+          Storage manager
         </button>
         <button className="adv-nav-button" type="button" onClick={() => scrollToSection('playtime')}>
           Playtime manager
@@ -66,6 +81,7 @@ export function AdvancedOptions() {
           <h1>Advanced Options</h1>
         </header>
         <DataBackups />
+        <StorageManager />
         <PlaytimeManager />
         <section id="help" className="adv-card">
           <h2>Notes</h2>
@@ -222,6 +238,405 @@ function DataBackups() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Storage manager
+// ---------------------------------------------------------------------------
+
+const SYNC_TOTAL_QUOTA = 102400;
+const SYNC_ITEM_QUOTA = 8192;
+// Local storage has no real cap with `unlimitedStorage` in the manifest —
+// the only ceiling is disk. These are *soft* reference values for the
+// progress bar so unusual growth still draws the eye. Past `LOCAL_SOFT_DANGER`
+// is "you probably have stale cache buildup" territory.
+const LOCAL_SOFT_TARGET = 20 * 1024 * 1024;
+const LOCAL_SOFT_DANGER = 50 * 1024 * 1024;
+
+const LOCAL_KEY_LABELS: Record<string, string> = {
+  'bloxplus.customizations': 'Customize edits',
+  'bloxplus.folders': 'Folders',
+  'bloxplus.lastSeen': 'Friend last-seen snapshots',
+  'bloxplus.profileAnnotations': 'Profile notes & nicknames',
+  'bloxplus.customTheme': 'Custom theme (legacy slot)',
+  'bloxplus.userThemes': 'Theme presets (incl. images)',
+  'bloxplus.playtime': 'Playtime entries',
+  'bloxplus.uhbl.sheet': 'UHBL sheet snapshot',
+  'bloxplus.lastPreImportBackup': 'Pre-import restore backup',
+};
+
+const CACHE_PREFIX = 'bloxplus.cache.';
+
+interface KeyUsage {
+  key: string;
+  label: string;
+  bytes: number;
+}
+
+interface StorageView {
+  sync: {
+    itemBytes: number;
+    totalBytes: number;
+  };
+  settingsBreakdown: KeyUsage[];
+  local: KeyUsage[];
+  cacheBytes: number;
+  cacheKeyCount: number;
+  localTotalBytes: number;
+  hotkeyCount: number;
+  scheduleSlotCount: number;
+  scheduleEnabled: boolean;
+  orphanPlaytimeCount: number;
+  legacyCustomThemeBytes: number;
+}
+
+function bytesLabel(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+function StorageManager() {
+  const [view, setView] = useState<StorageView | null>(null);
+  const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async (): Promise<void> => {
+    const v = await readStorageView();
+    setView(v);
+  };
+
+  useEffect(() => {
+    void refresh();
+    const onChange = () => {
+      void refresh();
+    };
+    chrome.storage.onChanged.addListener(onChange);
+    return () => chrome.storage.onChanged.removeListener(onChange);
+  }, []);
+
+  const runAction = async (label: string, action: () => Promise<number | void>): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await action();
+      const tail = typeof result === 'number' ? ` (${result} item${result === 1 ? '' : 's'})` : '';
+      setStatus({ kind: 'ok', text: `${label}${tail}.` });
+      await refresh();
+    } catch (err) {
+      setStatus({ kind: 'err', text: `${label} failed: ${(err as Error).message}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearHotkeys = (): Promise<void> => runAction('Hotkeys cleared', async () => {
+    const settings = await getSettings();
+    const count = Object.keys(settings.gameHotkeys ?? {}).length;
+    if (!count) return 0;
+    if (!confirm(`Clear all ${count} hotkey${count === 1 ? '' : 's'}? You can rebind from the popup.`)) return;
+    await setSettings({ gameHotkeys: {} });
+    return count;
+  });
+
+  const resetSchedule = (): Promise<void> => runAction('Theme schedule reset', async () => {
+    if (!confirm('Reset theme schedule to default 2 slots (disabled)? Your currently active themeId is unaffected.')) return;
+    await setSettings({ themeSchedule: getDefaultThemeSchedule() });
+  });
+
+  const clearApiCaches = (): Promise<void> => runAction('API caches cleared', async () => {
+    const all = await chrome.storage.local.get(null);
+    const keys = Object.keys(all).filter((k) => k.startsWith(CACHE_PREFIX));
+    if (!keys.length) return 0;
+    await chrome.storage.local.remove(keys);
+    return keys.length;
+  });
+
+  const dropUhbl = (): Promise<void> => runAction('UHBL snapshot dropped', async () => {
+    await chrome.storage.local.remove('bloxplus.uhbl.sheet');
+  });
+
+  const dropLastSeen = (): Promise<void> => runAction('Last-seen snapshots dropped', async () => {
+    if (!confirm('Drop friend last-seen snapshots? The background poll will rebuild them as friends go online again.')) return;
+    await chrome.storage.local.remove('bloxplus.lastSeen');
+  });
+
+  const dropPreImport = (): Promise<void> => runAction('Pre-import backup dropped', async () => {
+    await chrome.storage.local.remove('bloxplus.lastPreImportBackup');
+  });
+
+  const dropLegacyTheme = (): Promise<void> => runAction('Legacy custom theme dropped', async () => {
+    if (!confirm('Drop the legacy bloxplus.customTheme slot? Your saved themes in the new multi-preset list are unaffected. Only kept around for downgrade compatibility.')) return;
+    await chrome.storage.local.remove('bloxplus.customTheme');
+  });
+
+  const dropOrphanPlaytime = (): Promise<void> => runAction('Orphan playtime entries dropped', async () => {
+    const entries = await getPlaytime();
+    const kept = entries.filter((e) =>
+      (typeof e.universeId === 'number' && e.universeId > 0) ||
+      (e.gameName && e.gameName.trim().length > 0)
+    );
+    const dropped = entries.length - kept.length;
+    if (!dropped) return 0;
+    if (!confirm(`Drop ${dropped} playtime entr${dropped === 1 ? 'y' : 'ies'} with no name and no universeId?`)) return;
+    await setPlaytime(kept);
+    return dropped;
+  });
+
+  if (!view) {
+    return (
+      <section id="storage" className="adv-card">
+        <h2>Storage manager</h2>
+        <p>Measuring…</p>
+      </section>
+    );
+  }
+
+  const itemPct = Math.min(100, Math.round((view.sync.itemBytes / SYNC_ITEM_QUOTA) * 100));
+  const totalSyncPct = Math.min(100, Math.round((view.sync.totalBytes / SYNC_TOTAL_QUOTA) * 100));
+  // For the local meter we visualize against the soft danger threshold so
+  // 50 MB fills the bar — there's no real quota with `unlimitedStorage`.
+  const localFillPct = Math.min(100, Math.round((view.localTotalBytes / LOCAL_SOFT_DANGER) * 100));
+  const localTone: 'ok' | 'warn' | 'danger' =
+    view.localTotalBytes >= LOCAL_SOFT_DANGER ? 'danger' :
+    view.localTotalBytes >= LOCAL_SOFT_TARGET ? 'warn' : 'ok';
+
+  return (
+    <section id="storage" className="adv-card">
+      <div className="adv-card-head">
+        <div>
+          <h2>Storage manager</h2>
+          <p>
+            See what's using extension storage and trim what you don't need. Hotkeys and theme schedule
+            live in the synced 8 KB settings item — the practical ceiling that bites first.
+          </p>
+        </div>
+        <button onClick={() => void refresh()} disabled={busy}>Refresh</button>
+      </div>
+
+      <div className="adv-storage-meters">
+        <StorageMeter
+          title="Sync · settings item"
+          bytes={view.sync.itemBytes}
+          quota={SYNC_ITEM_QUOTA}
+          pct={itemPct}
+          subtitle="hotkeys + schedule + toggles, capped at 8 KB by Chrome"
+          danger={itemPct >= 90}
+        />
+        <StorageMeter
+          title="Sync · total"
+          bytes={view.sync.totalBytes}
+          quota={SYNC_TOTAL_QUOTA}
+          pct={totalSyncPct}
+          subtitle="all sync items, capped at 100 KB"
+        />
+        <StorageMeter
+          title="Local · total"
+          bytes={view.localTotalBytes}
+          quota={null}
+          pct={localFillPct}
+          tone={localTone}
+          subtitle={`no hard cap (unlimitedStorage); soft target ${bytesLabel(LOCAL_SOFT_TARGET)}, unusual past ${bytesLabel(LOCAL_SOFT_DANGER)}`}
+        />
+      </div>
+
+      <div className="adv-storage-section">
+        <h3>What's in your settings item ({bytesLabel(view.sync.itemBytes)})</h3>
+        <table className="adv-storage-table">
+          <thead>
+            <tr><th>Section</th><th>Approx. size</th></tr>
+          </thead>
+          <tbody>
+            {view.settingsBreakdown.map((row) => (
+              <tr key={row.key}>
+                <td>{row.label}</td>
+                <td>{bytesLabel(row.bytes)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="adv-actions">
+          <button onClick={() => void clearHotkeys()} disabled={busy || view.hotkeyCount === 0}>
+            Clear {view.hotkeyCount} hotkey{view.hotkeyCount === 1 ? '' : 's'}
+          </button>
+          <button onClick={() => void resetSchedule()} disabled={busy || (view.scheduleSlotCount <= 2 && !view.scheduleEnabled)}>
+            Reset theme schedule ({view.scheduleSlotCount} slot{view.scheduleSlotCount === 1 ? '' : 's'})
+          </button>
+        </div>
+      </div>
+
+      <div className="adv-storage-section">
+        <h3>Local storage breakdown</h3>
+        <table className="adv-storage-table">
+          <thead>
+            <tr><th>Key</th><th>Size</th></tr>
+          </thead>
+          <tbody>
+            {view.local.map((row) => (
+              <tr key={row.key}>
+                <td>{row.label}<code className="adv-storage-key">{row.key}</code></td>
+                <td>{bytesLabel(row.bytes)}</td>
+              </tr>
+            ))}
+            {view.cacheKeyCount > 0 && (
+              <tr>
+                <td>API caches<code className="adv-storage-key">{CACHE_PREFIX}* ({view.cacheKeyCount} keys)</code></td>
+                <td>{bytesLabel(view.cacheBytes)}</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <div className="adv-actions">
+          <button className="adv-secondary" onClick={() => void clearApiCaches()} disabled={busy || view.cacheKeyCount === 0}>
+            Clear API caches
+          </button>
+          <button className="adv-secondary" onClick={() => void dropUhbl()} disabled={busy}>
+            Drop UHBL snapshot
+          </button>
+          <button className="adv-secondary" onClick={() => void dropLastSeen()} disabled={busy}>
+            Drop last-seen snapshots
+          </button>
+          <button className="adv-secondary" onClick={() => void dropPreImport()} disabled={busy}>
+            Drop pre-import backup
+          </button>
+          {view.legacyCustomThemeBytes > 0 && (
+            <button className="adv-secondary" onClick={() => void dropLegacyTheme()} disabled={busy}>
+              Drop legacy custom theme ({bytesLabel(view.legacyCustomThemeBytes)})
+            </button>
+          )}
+          {view.orphanPlaytimeCount > 0 && (
+            <button className="adv-danger" onClick={() => void dropOrphanPlaytime()} disabled={busy}>
+              Drop {view.orphanPlaytimeCount} orphan playtime entr{view.orphanPlaytimeCount === 1 ? 'y' : 'ies'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {status && <div className={`adv-status adv-status-${status.kind}`}>{status.text}</div>}
+    </section>
+  );
+}
+
+function StorageMeter({
+  title,
+  bytes,
+  quota,
+  pct,
+  subtitle,
+  danger,
+  tone,
+}: {
+  title: string;
+  bytes: number;
+  /** Pass null when there is no hard cap — the meter shows bytes used only. */
+  quota: number | null;
+  pct: number;
+  subtitle: string;
+  danger?: boolean;
+  tone?: 'ok' | 'warn' | 'danger';
+}) {
+  const fillClass = tone
+    ? `adv-meter-fill-${tone}`
+    : danger || pct >= 90 ? 'adv-meter-fill-danger'
+    : pct >= 75 ? 'adv-meter-fill-warn'
+    : 'adv-meter-fill-ok';
+  const value = quota === null
+    ? bytesLabel(bytes)
+    : `${bytesLabel(bytes)} / ${bytesLabel(quota)} (${pct}%)`;
+  return (
+    <div className="adv-meter">
+      <div className="adv-meter-head">
+        <strong>{title}</strong>
+        <span>{value}</span>
+      </div>
+      <div className="adv-meter-bar"><div className={`adv-meter-fill ${fillClass}`} style={{ width: `${pct}%` }} /></div>
+      <div className="adv-meter-sub">{subtitle}</div>
+    </div>
+  );
+}
+
+async function readStorageView(): Promise<StorageView> {
+  const [all, syncItem, syncTotal, localTotal] = await Promise.all([
+    chrome.storage.local.get(null),
+    chrome.storage.sync.getBytesInUse('bloxplus.settings'),
+    chrome.storage.sync.getBytesInUse(null),
+    chrome.storage.local.getBytesInUse(null),
+  ]);
+
+  const localKeys = Object.keys(all).filter((k) => !k.startsWith(CACHE_PREFIX));
+  const cacheKeys = Object.keys(all).filter((k) => k.startsWith(CACHE_PREFIX));
+
+  const localUsage = await Promise.all(
+    localKeys.map(async (key) => ({
+      key,
+      label: LOCAL_KEY_LABELS[key] ?? key,
+      bytes: await chrome.storage.local.getBytesInUse(key),
+    }))
+  );
+  localUsage.sort((a, b) => b.bytes - a.bytes);
+
+  const cacheBytes = cacheKeys.length
+    ? await chrome.storage.local.getBytesInUse(cacheKeys)
+    : 0;
+
+  const settings = await getSettings();
+  const settingsBreakdown: KeyUsage[] = [
+    {
+      key: 'gameHotkeys',
+      label: `Hotkeys (${Object.keys(settings.gameHotkeys ?? {}).length} bindings)`,
+      bytes: approxJsonBytes(settings.gameHotkeys ?? {}),
+    },
+    {
+      key: 'themeSchedule',
+      label: `Theme schedule (${settings.themeSchedule?.slots?.length ?? 0} slots${settings.themeSchedule?.enabled ? ', enabled' : ', disabled'})`,
+      bytes: approxJsonBytes(settings.themeSchedule ?? {}),
+    },
+    {
+      key: 'other',
+      label: 'Other toggles & strings',
+      bytes: approxJsonBytes(otherSettings(settings)),
+    },
+  ];
+  settingsBreakdown.sort((a, b) => b.bytes - a.bytes);
+
+  const playtime = await getPlaytime();
+  const orphanPlaytimeCount = playtime.filter((e) =>
+    !(typeof e.universeId === 'number' && e.universeId > 0) &&
+    !(e.gameName && e.gameName.trim().length > 0)
+  ).length;
+
+  const legacyCustomThemeBytes = localUsage.find((u) => u.key === 'bloxplus.customTheme')?.bytes ?? 0;
+
+  return {
+    sync: { itemBytes: syncItem, totalBytes: syncTotal },
+    settingsBreakdown,
+    local: localUsage,
+    cacheBytes,
+    cacheKeyCount: cacheKeys.length,
+    localTotalBytes: localTotal,
+    hotkeyCount: Object.keys(settings.gameHotkeys ?? {}).length,
+    scheduleSlotCount: settings.themeSchedule?.slots?.length ?? 0,
+    scheduleEnabled: Boolean(settings.themeSchedule?.enabled),
+    orphanPlaytimeCount,
+    legacyCustomThemeBytes,
+  };
+}
+
+function otherSettings(settings: object): Record<string, unknown> {
+  const copy = { ...(settings as Record<string, unknown>) };
+  delete copy.gameHotkeys;
+  delete copy.themeSchedule;
+  return copy;
+}
+
+function approxJsonBytes(value: unknown): number {
+  // Rough approximation — Chrome's storage adds per-key overhead but this is
+  // good enough to compare sections within the settings item.
+  try {
+    return new Blob([JSON.stringify(value)]).size;
+  } catch {
+    return 0;
+  }
+}
+
 function PlaytimeManager() {
   const [entries, setEntries] = useState<GamePlaytimeEntry[]>([]);
   const [hydratedNames, setHydratedNames] = useState<Map<number, string>>(new Map());
@@ -367,9 +782,17 @@ function PlaytimeManager() {
   };
 
   const mergeDuplicates = async (): Promise<void> => {
+    const priorUniverseId = selected?.entry.universeId;
     const next = mergeDuplicateUniverseEntries(entries);
     await writeEntries(next, `Merged ${entries.length - next.length} duplicate entr${entries.length - next.length === 1 ? 'y' : 'ies'}.`);
-    setSelectedKey(next[0] ? playtimeEntryKey(next[0], 0) : '');
+    const survivingIndex = typeof priorUniverseId === 'number'
+      ? next.findIndex((entry) => entry.universeId === priorUniverseId)
+      : -1;
+    if (survivingIndex >= 0) {
+      setSelectedKey(playtimeEntryKey(next[survivingIndex], survivingIndex));
+    } else {
+      setSelectedKey(next[0] ? playtimeEntryKey(next[0], 0) : '');
+    }
   };
 
   const gameUrl = selected ? playtimeGameUrl(selected.entry) : null;
@@ -734,6 +1157,28 @@ const advancedCss = `
   .adv-grid-three { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
   .adv-add-time { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
   code { color: #bcdcff; }
+  .adv-storage-meters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .adv-meter { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; padding: 11px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .adv-meter-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: rgba(232,237,242,0.85); }
+  .adv-meter-head strong { font-size: 13px; }
+  .adv-meter-bar { height: 6px; background: rgba(255,255,255,0.10); border-radius: 4px; overflow: hidden; }
+  .adv-meter-fill { height: 100%; transition: width 220ms ease; }
+  .adv-meter-fill-ok { background: linear-gradient(90deg, #2bb14c, #58c976); }
+  .adv-meter-fill-warn { background: linear-gradient(90deg, #d9a93e, #f5be41); }
+  .adv-meter-fill-danger { background: linear-gradient(90deg, #d95d4f, #ff8478); }
+  .adv-meter-sub { font-size: 11px; color: rgba(232,237,242,0.50); }
+  .adv-storage-section { margin-top: 16px; }
+  .adv-storage-section h3 { margin: 0 0 8px; font-size: 14px; color: rgba(232,237,242,0.92); }
+  .adv-storage-table { width: 100%; border-collapse: collapse; font-size: 13px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); border-radius: 6px; overflow: hidden; }
+  .adv-storage-table th, .adv-storage-table td { padding: 8px 12px; text-align: left; }
+  .adv-storage-table thead { background: rgba(255,255,255,0.05); }
+  .adv-storage-table th { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: rgba(232,237,242,0.55); }
+  .adv-storage-table tbody tr + tr { border-top: 1px solid rgba(255,255,255,0.05); }
+  .adv-storage-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; color: rgba(232,237,242,0.85); white-space: nowrap; }
+  .adv-storage-key { display: block; margin-top: 2px; font-size: 11px; color: rgba(188,220,255,0.55); }
+  @media (max-width: 820px) {
+    .adv-storage-meters { grid-template-columns: 1fr; }
+  }
   @media (max-width: 820px) {
     .adv-page { display: block; }
     .adv-sidebar { position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid rgba(255,255,255,0.08); }

@@ -1,12 +1,12 @@
 /**
  * Always-on capture-phase click listener that stashes any clicked
- * `/users/{id}/profile` userId in sessionStorage. Lets the (lazy)
+ * `/users/{id}/profile` userId in sessionStorage. Lets
  * terminatedProfileEnhancer recover the userId after Roblox redirects
  * a banned profile to /request-error.
  *
- * Kept out of terminatedProfileEnhancer so the heavy renderer can stay
- * lazy-loaded (1100+ lines, only needed on profile / error routes) while
- * the trap itself runs site-wide.
+ * Installed from router.ts on module load (and idempotently re-called
+ * from terminatedProfileEnhancer.run() as a belt-and-suspenders pass)
+ * so it's listening site-wide before any click can happen.
  */
 
 const SESSION_KEY = 'bp.lastProfileNav';

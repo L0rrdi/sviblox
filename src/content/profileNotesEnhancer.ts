@@ -41,7 +41,6 @@ let mountedForUser: number | null = null;
 let mountedForPath: string | null = null;
 let inflight = false;
 let subscribed = false;
-let saveTimer: number | undefined;
 
 export async function run(): Promise<void> {
   const userId = readProfileUserId();
@@ -195,23 +194,30 @@ function attachAutoSave(card: HTMLElement, userId: number): void {
   const status = card.querySelector<HTMLElement>('[data-status]');
   const updated = card.querySelector<HTMLElement>('[data-updated]');
 
+  // Per-card timer (closure-local). Was previously module-level, which let a
+  // second card's scheduleSave clearTimeout the first card's pending save —
+  // navigating between profiles mid-typing silently lost your unsaved changes.
+  // With closure scope, each card owns its own pending save; the captured
+  // userId + input elements (even when detached) keep saving correctly.
+  let saveTimer: number | undefined;
+
   const scheduleSave = (immediate = false): void => {
     if (saveTimer !== undefined) {
       window.clearTimeout(saveTimer);
       saveTimer = undefined;
     }
     const fire = async () => {
-      if (status) status.textContent = 'Saving...';
+      if (status?.isConnected) status.textContent = 'Saving...';
       const next = await setAnnotation(userId, {
         nickname: nicknameEl.value,
         note: noteEl.value,
       });
-      if (status) status.textContent = 'Saved';
-      if (updated) {
+      if (status?.isConnected) status.textContent = 'Saved';
+      if (updated?.isConnected) {
         updated.textContent = next?.updatedAt ? `Saved ${formatRelative(next.updatedAt)}` : '';
       }
       window.setTimeout(() => {
-        if (status && status.textContent === 'Saved') status.textContent = '';
+        if (status?.isConnected && status.textContent === 'Saved') status.textContent = '';
       }, 1200);
     };
     if (immediate) void fire();

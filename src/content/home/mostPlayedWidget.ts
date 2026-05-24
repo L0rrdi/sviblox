@@ -238,6 +238,46 @@ interface WidgetState {
 
 let widget: HTMLElement | null = null;
 let state: WidgetState | null = null;
+let playtimeSubscribed = false;
+
+/**
+ * Live-refresh hook: the SW per-minute presence accumulator writes to
+ * `bloxplus.playtime` while the user has the home page open. Without
+ * this, tracked time only shows up after a navigation away and back.
+ * Subscription is installed once at module level (idempotent) and only
+ * does work while the widget is mounted.
+ */
+function ensurePlaytimeSubscription(): void {
+  if (playtimeSubscribed) return;
+  playtimeSubscribed = true;
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes['bloxplus.playtime']) return;
+    if (!widget || !state || state.destroyed) return;
+    void refreshFromStorage();
+  });
+}
+
+async function refreshFromStorage(): Promise<void> {
+  if (!widget || !state || state.destroyed) return;
+  const next = await getPlaytime();
+  if (!state || state.destroyed) return;
+  state.all = next;
+  // Hydrate info/icons for any newly-seen universeIds whose top totalSeconds
+  // would put them inside MAX_TILES. We don't refetch already-known ids.
+  const ranked = rankedUniverseIds(next);
+  const missing = ranked.filter((id) => !state!.info.has(id)).slice(0, 50);
+  if (missing.length) {
+    try {
+      const [info, icons] = await Promise.all([getGameInfo(missing), getGameIcons(missing)]);
+      if (!state || state.destroyed) return;
+      for (const [id, gi] of info) state.info.set(id, gi);
+      for (const [id, url] of icons) state.icons.set(id, url);
+    } catch {
+      // Render what we have.
+    }
+  }
+  renderTiles();
+}
 
 export async function run(settings: Settings): Promise<void> {
   if (!isHomePage()) {
@@ -299,9 +339,11 @@ export async function run(settings: Settings): Promise<void> {
     ? settings.homeWidgetWindow
     : 'all') as WindowKey;
   state = { all, info: new Map(), icons: new Map(), currentWindow: initialWindow, destroyed: false };
+  ensurePlaytimeSubscription();
 
-  // Pre-fetch info/icons for the top MAX_TILES across all windows.
-  const ids = uniqueUniverseIds(all).slice(0, 200);
+  // Prefetch info/icons for the top tracked games by playtime so the user's
+  // most-played tiles render hydrated regardless of how many games they have.
+  const ids = rankedUniverseIds(all).slice(0, 200);
   void Promise.all([getGameInfo(ids), getGameIcons(ids)]).then(([info, icons]) => {
     if (!state || state.destroyed) return;
     state.info = info;
@@ -448,12 +490,23 @@ function renderTiles(): void {
     .join('');
 }
 
-function uniqueUniverseIds(entries: GamePlaytimeEntry[]): number[] {
-  const seen = new Set<number>();
+/**
+ * Universe IDs ranked by max totalSeconds desc. Used for the bounded
+ * prefetch — heavy users with >200 tracked games must get their most-played
+ * tiles hydrated first, otherwise sorting ascending by ID hydrates the
+ * lowest-ID 200 games and the actual top tiles render iconless/nameless.
+ */
+function rankedUniverseIds(entries: GamePlaytimeEntry[]): number[] {
+  const byId = new Map<number, number>();
   for (const e of entries) {
-    if (typeof e.universeId === 'number') seen.add(e.universeId);
+    if (typeof e.universeId !== 'number') continue;
+    const prev = byId.get(e.universeId) ?? 0;
+    const cur = e.totalSeconds ?? 0;
+    if (cur > prev) byId.set(e.universeId, cur);
   }
-  return [...seen].sort((a, b) => a - b);
+  return [...byId.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => id);
 }
 
 async function waitFor<T>(fn: () => T | null, timeoutMs: number): Promise<T | null> {

@@ -11,7 +11,7 @@
  * the user can never get stuck in mode if they panic-toggle.
  */
 
-import { getSettings, onSettingsChanged } from '@/storage/settingsStore';
+import { getSettings, onSettingsChanged, setSettings } from '@/storage/settingsStore';
 import {
   addCustomButton,
   ElementEdit,
@@ -46,6 +46,9 @@ let selectedId: string | null = null;
 let pendingCustomIconDataUrl = '';
 let iconColorToolsForId: string | null = null;
 let lastIconTintColor = '#4a90e2';
+// Mirrored from Settings.customizeShowHiddenInMode so renderDrawer can read
+// it synchronously. Kept in sync via onSettingsChanged in install().
+let cachedShowHiddenInMode = true;
 
 type EyeDropperWindow = Window & {
   EyeDropper?: new () => {
@@ -60,7 +63,14 @@ export function install(): void {
   window.addEventListener('hashchange', () => run());
   window.addEventListener('popstate', () => run());
   onSettingsChanged((s) => {
+    cachedShowHiddenInMode = s.customizeShowHiddenInMode !== false;
     if (!s.showCustomize && active) exitMode();
+    else if (active) renderDrawer();
+  });
+  // Initial read so the toggle reflects stored state on first paint.
+  void getSettings().then((s) => {
+    cachedShowHiddenInMode = s.customizeShowHiddenInMode !== false;
+    if (active) renderDrawer();
   });
   onCustomizationsChanged(() => {
     if (!active) return;
@@ -110,6 +120,11 @@ function enterMode(): void {
 function exitMode(): void {
   active = false;
   selectedId = null;
+  // Don't carry an in-progress "Add custom button" upload across sessions.
+  // Without this, exiting after uploading but before clicking Add leaves
+  // the next entry still showing "Uploaded image ready" with the old image.
+  pendingCustomIconDataUrl = '';
+  iconColorToolsForId = null;
   document.body.classList.remove(BODY_CLASS);
   document.removeEventListener('click', clickInterceptor, true);
   document.removeEventListener('keydown', keyHandler, true);
@@ -130,8 +145,26 @@ function clickInterceptor(e: MouseEvent): void {
   if (!li) return;
   const nextId = customId(li);
   // Toggle: clicking the already-selected nav item closes the editor.
-  selectedId = selectedId === nextId ? null : nextId;
+  setSelectedId(selectedId === nextId ? null : nextId);
   renderDrawer();
+}
+
+/**
+ * Centralized selectedId mutation. Any pending custom-button icon upload from
+ * the Add form is tied to the *currently-visible* "Add custom button" section
+ * only — once focus moves to editing an existing item, the upload is no
+ * longer applicable and the "Uploaded image ready" hint would be misleading.
+ */
+function setSelectedId(id: string | null): void {
+  if (selectedId === id) return;
+  selectedId = id;
+  pendingCustomIconDataUrl = '';
+  iconColorToolsForId = null;
+  // Switching to edit an existing item collapses the add-button form so the
+  // editor takes the visual focus. The form re-opens itself if the user
+  // clicks the "+ New custom button" summary again.
+  addFormOpen = false;
+  addFormError = '';
 }
 
 function keyHandler(e: KeyboardEvent): void {
@@ -202,6 +235,12 @@ function renderDrawer(): void {
       <h2>Customize</h2>
       <button type="button" class="bp-cust-btn bp-cust-btn-ghost" data-action="exit">Exit</button>
     </header>
+    <div class="bp-cust-drawer-subheader">
+      <label class="bp-cust-toggle">
+        <input type="checkbox" data-field="showHidden" ${cachedShowHiddenInMode ? 'checked' : ''} />
+        <span>Show hidden items while customizing</span>
+      </label>
+    </div>
     <div class="bp-cust-drawer-body">
       ${renderAddButtonForm()}
       <div data-bp-list-host>${renderActiveList(spec)}</div>
@@ -244,33 +283,45 @@ function cleanEditText(text: string | undefined, id: string | null): string {
   return text;
 }
 
+// Module-level so the form re-opens itself when validation fails and stays
+// open while the user fixes the inputs. Cleared on successful add and on
+// every selectedId change (so editing an existing item starts collapsed).
+let addFormOpen = false;
+let addFormError = '';
+
 function renderAddButtonForm(): string {
+  const open = addFormOpen || addFormError;
   return `
-    <section class="bp-cust-add-section">
-      <h3 class="bp-cust-list-heading">Add custom button</h3>
-      <label class="bp-cust-field">
-        <span>Name</span>
-        <input type="text" data-field="newLabel" placeholder="Button name" maxlength="40" />
-      </label>
-      <label class="bp-cust-field">
-        <span>URL</span>
-        <input type="url" data-field="newUrl" placeholder="https://www.roblox.com/..." />
-      </label>
-      <label class="bp-cust-field">
-        <span>Built-in icon</span>
-        <select data-field="newIconPreset">${animatedIconOptions(undefined)}</select>
-      </label>
-      <label class="bp-cust-field">
-        <span>Image URL</span>
-        <input type="url" data-field="newIconUrl" placeholder="...or upload an image" value="${escapeAttr(pendingCustomIconDataUrl.startsWith('data:') ? '' : pendingCustomIconDataUrl)}" />
-      </label>
-      <div class="bp-cust-add-actions">
-        <input type="file" accept="image/*" data-field="newIconFile" hidden />
-        <button type="button" class="bp-cust-btn" data-action="new-icon-upload">Upload image</button>
-        <button type="button" class="bp-cust-btn" data-action="add-custom-button">Add button</button>
+    <details class="bp-cust-add-section" ${open ? 'open' : ''} data-bp-add-section>
+      <summary class="bp-cust-add-summary">
+        <span>+ New custom button</span>
+      </summary>
+      <div class="bp-cust-add-body">
+        <label class="bp-cust-field">
+          <span>Name</span>
+          <input type="text" data-field="newLabel" placeholder="Button name" maxlength="40" />
+        </label>
+        <label class="bp-cust-field">
+          <span>URL</span>
+          <input type="url" data-field="newUrl" placeholder="https://www.roblox.com/..." />
+        </label>
+        <label class="bp-cust-field">
+          <span>Built-in icon</span>
+          <select data-field="newIconPreset">${animatedIconOptions(undefined)}</select>
+        </label>
+        <label class="bp-cust-field">
+          <span>Image URL</span>
+          <input type="url" data-field="newIconUrl" placeholder="...or upload an image" value="${escapeAttr(pendingCustomIconDataUrl.startsWith('data:') ? '' : pendingCustomIconDataUrl)}" />
+        </label>
+        <div class="bp-cust-add-actions">
+          <input type="file" accept="image/*" data-field="newIconFile" hidden />
+          <button type="button" class="bp-cust-btn" data-action="new-icon-upload">Upload image</button>
+          <button type="button" class="bp-cust-btn" data-action="add-custom-button">Add button</button>
+        </div>
+        ${pendingCustomIconDataUrl.startsWith('data:') ? '<div class="bp-cust-upload-ready">Uploaded image ready</div>' : ''}
+        ${addFormError ? `<div class="bp-cust-add-error" role="alert">${escapeHtml(addFormError)}</div>` : ''}
       </div>
-      ${pendingCustomIconDataUrl.startsWith('data:') ? '<div class="bp-cust-upload-ready">Uploaded image ready</div>' : ''}
-    </section>
+    </details>
   `;
 }
 
@@ -394,11 +445,11 @@ function bindListEvents(drawer: HTMLElement): void {
       const id = btn.dataset.custSelect ?? null;
       // Toggle: clicking the already-selected row closes the editor.
       if (id && id === selectedId) {
-        selectedId = null;
+        setSelectedId(null);
         renderDrawer();
         return;
       }
-      selectedId = id;
+      setSelectedId(id);
       const el = id ? resolveById(id, getCachedCustomizations().entries[id]?.fallbackSelector) : null;
       flashHighlight(el);
       renderDrawer();
@@ -409,7 +460,7 @@ function bindListEvents(drawer: HTMLElement): void {
       e.stopPropagation();
       const id = btn.dataset.custRemove;
       if (!id) return;
-      if (selectedId === id) selectedId = null;
+      if (selectedId === id) setSelectedId(null);
       if (id.startsWith('leftnav::custom-button-')) {
         void removeCustomButton(id.replace('leftnav::custom-button-', ''));
       } else {
@@ -486,6 +537,7 @@ function renderSelected(edit: ElementEdit, currentLabel: string, currentIconUrl:
           <input type="color" data-field="iconColor" value="${escapeAttr(lastIconTintColor)}" aria-label="Icon color" />
           <button type="button" class="bp-cust-btn" data-action="icon-color-apply">Apply color</button>
           <button type="button" class="bp-cust-btn bp-cust-btn-ghost" data-action="icon-color-eyedropper" ${canEyeDrop ? '' : 'disabled'}>Pick from screen</button>
+          ${selectedIconHasTint() ? '<button type="button" class="bp-cust-btn bp-cust-btn-ghost bp-cust-revert-tint" data-action="icon-revert-tint" title="Restore the original uploaded image">↺ Revert tint</button>' : ''}
         </div>
       ` : ''}
       <input type="url" data-field="iconUrl" placeholder="…or paste image URL" value="${
@@ -503,6 +555,31 @@ function renderSelected(edit: ElementEdit, currentLabel: string, currentIconUrl:
 function bindDrawerEvents(drawer: HTMLElement): void {
   bindListEvents(drawer);
   drawer.querySelector('[data-action="exit"]')?.addEventListener('click', () => exitMode());
+  // Show-hidden toggle: persists to Settings so the applier picks it up on
+  // its next tick. Cached locally so renderDrawer can read sync.
+  drawer.querySelector<HTMLInputElement>('[data-field="showHidden"]')?.addEventListener('change', (e) => {
+    const checked = (e.target as HTMLInputElement).checked;
+    cachedShowHiddenInMode = checked;
+    void setSettings({ customizeShowHiddenInMode: checked });
+  });
+  // <details> open/close → keep addFormOpen in sync so re-renders preserve
+  // the user's intent. Clear validation errors when they collapse the form.
+  const addSection = drawer.querySelector<HTMLDetailsElement>('[data-bp-add-section]');
+  addSection?.addEventListener('toggle', () => {
+    addFormOpen = addSection.open;
+    if (!addSection.open) addFormError = '';
+  });
+  // Any input change in the add-form clears the error so it doesn't linger
+  // after the user fixes the offending field.
+  for (const f of drawer.querySelectorAll<HTMLInputElement>('[data-field^="new"]')) {
+    f.addEventListener('input', () => {
+      if (addFormError) {
+        addFormError = '';
+        const errEl = drawer.querySelector('.bp-cust-add-error');
+        errEl?.remove();
+      }
+    });
+  }
   drawer.querySelector('[data-action="new-icon-upload"]')?.addEventListener('click', () => {
     drawer.querySelector<HTMLInputElement>('[data-field="newIconFile"]')?.click();
   });
@@ -525,7 +602,7 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   drawer.querySelector('[data-action="delete-custom-button"]')?.addEventListener('click', () => {
     if (!selectedId?.startsWith('leftnav::custom-button-')) return;
     const id = selectedId.replace('leftnav::custom-button-', '');
-    selectedId = null;
+    setSelectedId(null);
     void removeCustomButton(id);
   });
 
@@ -558,10 +635,14 @@ function bindDrawerEvents(drawer: HTMLElement): void {
     if (selectedId.startsWith('leftnav::custom-button-')) {
       void updateCustomButton(selectedId.replace('leftnav::custom-button-', ''), {
         iconDataUrl: undefined,
+        originalIconDataUrl: undefined,
         iconPreset: undefined,
       });
     }
-    void writeEdit({ iconDataUrl: undefined, iconPreset: undefined });
+    void writeEdit({ iconDataUrl: undefined, originalIconDataUrl: undefined, iconPreset: undefined });
+  });
+  drawer.querySelector('[data-action="icon-revert-tint"]')?.addEventListener('click', () => {
+    void revertSelectedIconTint();
   });
 
   const textInput = drawer.querySelector<HTMLInputElement>('[data-field="text"]');
@@ -578,7 +659,14 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   });
   const urlInput = drawer.querySelector<HTMLInputElement>('[data-field="iconUrl"]');
   urlInput?.addEventListener('change', () => {
-    void commitSelectedIcon({ iconDataUrl: urlInput.value.trim() || undefined, iconPreset: undefined });
+    const v = urlInput.value.trim();
+    // Paste also seeds the original so a future tint is revertable. Empty
+    // string clears both (icon-clear button does the same explicitly).
+    void commitSelectedIcon({
+      iconDataUrl: v || undefined,
+      originalIconDataUrl: v || undefined,
+      iconPreset: undefined,
+    });
   });
 }
 
@@ -596,25 +684,81 @@ async function handleAddCustomButton(drawer: HTMLElement): Promise<void> {
   const rawUrl = drawer.querySelector<HTMLInputElement>('[data-field="newUrl"]')?.value.trim() ?? '';
   const iconUrl = drawer.querySelector<HTMLInputElement>('[data-field="newIconUrl"]')?.value.trim() ?? '';
   const iconPreset = drawer.querySelector<HTMLSelectElement>('[data-field="newIconPreset"]')?.value.trim() ?? '';
+
+  // Inline validation — previously silent-no-op on missing/invalid input.
+  if (!label) {
+    addFormError = 'Name is required.';
+    addFormOpen = true;
+    renderDrawer();
+    return;
+  }
+  if (!rawUrl) {
+    addFormError = 'URL is required.';
+    addFormOpen = true;
+    renderDrawer();
+    return;
+  }
   const url = normalizeCustomUrl(rawUrl);
-  if (!label || !url) return;
+  if (!url) {
+    addFormError = `"${rawUrl}" isn't a valid http(s) URL.`;
+    addFormOpen = true;
+    renderDrawer();
+    return;
+  }
+  if (iconUrl && !pendingCustomIconDataUrl) {
+    // Reject "Image URL" entries that aren't valid http(s) (already a URL
+    // input but users sometimes paste data: URLs or partial paths). Allow
+    // pendingCustomIconDataUrl through unchecked — it's a canvas-produced
+    // data URL, vetted by us.
+    if (!iconUrl.startsWith('data:image/') && !normalizeCustomUrl(iconUrl)) {
+      addFormError = `Image URL "${iconUrl}" isn't valid.`;
+      addFormOpen = true;
+      renderDrawer();
+      return;
+    }
+  }
+
   const explicitIcon = pendingCustomIconDataUrl || iconUrl || undefined;
   const button = await addCustomButton({
     label,
     url,
     iconDataUrl: explicitIcon,
+    originalIconDataUrl: explicitIcon, // stash for future "Revert tint" — see CM4
     iconPreset: explicitIcon ? undefined : iconPreset || undefined,
   });
   pendingCustomIconDataUrl = '';
-  selectedId = `leftnav::custom-button-${button.id}`;
+  addFormError = '';
+  addFormOpen = false;
+  setSelectedId(`leftnav::custom-button-${button.id}`);
   renderDrawer();
 }
 
-function normalizeCustomUrl(raw: string): string {
-  if (!raw) return '';
-  if (/^https?:\/\//i.test(raw)) return raw;
-  if (raw.startsWith('/')) return `https://www.roblox.com${raw}`;
-  return `https://${raw}`;
+/**
+ * Returns a canonical https URL string, or null if `raw` can't be made into
+ * a safe http/https URL. Rejects every other scheme (`javascript:`, `data:`,
+ * `file:`, `chrome:`, etc.) so a custom button can never become a click-trap.
+ */
+function normalizeCustomUrl(raw: string): string | null {
+  if (!raw) return null;
+  let candidate: string;
+  if (/^https?:\/\//i.test(raw)) {
+    candidate = raw;
+  } else if (raw.startsWith('/')) {
+    candidate = `https://www.roblox.com${raw}`;
+  } else if (/^[a-z]+:/i.test(raw)) {
+    // Has a scheme but it's not http(s) — refuse.
+    return null;
+  } else {
+    candidate = `https://${raw}`;
+  }
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (!u.hostname) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
 }
 
 async function moveById(id: string, delta: -1 | 1): Promise<void> {
@@ -667,7 +811,13 @@ async function handleIconUpload(file: File): Promise<void> {
   try {
     const dataUrl = await resizeImageToDataUrl(file, 32);
     iconColorToolsForId = selectedId;
-    await commitSelectedIcon({ iconDataUrl: dataUrl, iconPreset: undefined });
+    // Stash the upload as both iconDataUrl and originalIconDataUrl so a
+    // future tint can be reverted without losing the original image.
+    await commitSelectedIcon({
+      iconDataUrl: dataUrl,
+      originalIconDataUrl: dataUrl,
+      iconPreset: undefined,
+    });
   } catch (e) {
     console.warn('[SviBlox] Customize icon upload failed', e);
   }
@@ -681,7 +831,11 @@ async function handleIconUpload(file: File): Promise<void> {
  * by the applier (which skips applyIcon for custom buttons — they own their
  * icon state via syncCustomButtons).
  */
-async function commitSelectedIcon(patch: { iconDataUrl?: string; iconPreset?: string }): Promise<void> {
+async function commitSelectedIcon(patch: {
+  iconDataUrl?: string;
+  originalIconDataUrl?: string;
+  iconPreset?: string;
+}): Promise<void> {
   if (!selectedId) return;
   if (selectedId.startsWith('leftnav::custom-button-')) {
     const id = selectedId.replace('leftnav::custom-button-', '');
@@ -699,18 +853,51 @@ function getSelectedIconUrl(): string {
   return editIcon || customIcon || '';
 }
 
+function getSelectedOriginalIconUrl(): string {
+  if (!selectedId) return '';
+  const spec = getCachedCustomizations();
+  const editOriginal = spec.entries[selectedId]?.originalIconDataUrl;
+  const customOriginal = customButtonForId(selectedId, spec)?.originalIconDataUrl;
+  return editOriginal || customOriginal || '';
+}
+
+/** True when a non-tinted original is stashed AND it differs from the current
+ * (tinted) icon. Drives the "Revert tint" button visibility. */
+function selectedIconHasTint(): boolean {
+  const original = getSelectedOriginalIconUrl();
+  const current = getSelectedIconUrl();
+  return Boolean(original) && Boolean(current) && original !== current;
+}
+
 async function tintSelectedIcon(color: string): Promise<void> {
-  const source = getSelectedIconUrl();
+  const original = getSelectedOriginalIconUrl();
+  const current = getSelectedIconUrl();
+  // Always tint from the ORIGINAL (not the already-tinted current) — otherwise
+  // tinting a red icon green produces brown rather than green.
+  const source = original || current;
   if (!source) return;
   try {
     lastIconTintColor = color;
     const dataUrl = await tintIconToDataUrl(source, color, 32);
-    await commitSelectedIcon({ iconDataUrl: dataUrl, iconPreset: undefined });
+    // If this is the first tint, the upload path already wrote original; if
+    // not (legacy data from before this field existed), backfill original
+    // with the pre-tint value so future reverts work.
+    const patch: { iconDataUrl: string; originalIconDataUrl?: string; iconPreset: undefined } =
+      { iconDataUrl: dataUrl, iconPreset: undefined };
+    if (!original && current) patch.originalIconDataUrl = current;
+    await commitSelectedIcon(patch);
     iconColorToolsForId = selectedId;
     renderDrawer();
   } catch (e) {
     console.warn('[SviBlox] Customize icon color failed', e);
   }
+}
+
+async function revertSelectedIconTint(): Promise<void> {
+  const original = getSelectedOriginalIconUrl();
+  if (!original) return;
+  await commitSelectedIcon({ iconDataUrl: original, iconPreset: undefined });
+  renderDrawer();
 }
 
 async function pickIconColorFromScreen(): Promise<void> {
@@ -1002,10 +1189,27 @@ function ensureStyle(): void {
       padding-bottom: 14px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
     }
-    #${DRAWER_ID} .bp-cust-add-section {
-      display: flex; flex-direction: column; gap: 8px;
+    #${DRAWER_ID} details.bp-cust-add-section {
       padding-bottom: 14px;
       border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    #${DRAWER_ID} details.bp-cust-add-section > summary.bp-cust-add-summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 6px 0;
+      font-size: 12px; font-weight: 700; text-transform: uppercase;
+      opacity: 0.75; letter-spacing: 0.5px;
+      display: flex; align-items: center;
+    }
+    #${DRAWER_ID} details.bp-cust-add-section > summary.bp-cust-add-summary::-webkit-details-marker {
+      display: none;
+    }
+    #${DRAWER_ID} details.bp-cust-add-section[open] > summary.bp-cust-add-summary {
+      opacity: 1;
+    }
+    #${DRAWER_ID} .bp-cust-add-body {
+      display: flex; flex-direction: column; gap: 8px;
+      padding-top: 6px;
     }
     #${DRAWER_ID} .bp-cust-add-actions {
       display: grid;
@@ -1015,6 +1219,31 @@ function ensureStyle(): void {
     #${DRAWER_ID} .bp-cust-upload-ready {
       font-size: 11px;
       color: #86efac;
+    }
+    #${DRAWER_ID} .bp-cust-add-error {
+      font-size: 12px;
+      color: #ff8a85;
+      background: rgba(217, 83, 79, 0.14);
+      border: 1px solid rgba(217, 83, 79, 0.32);
+      border-radius: 6px;
+      padding: 6px 10px;
+    }
+    #${DRAWER_ID} .bp-cust-drawer-subheader {
+      padding: 0 16px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    #${DRAWER_ID} .bp-cust-toggle {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; opacity: 0.85;
+      cursor: pointer;
+    }
+    #${DRAWER_ID} .bp-cust-toggle input[type="checkbox"] {
+      width: 14px; height: 14px;
+      accent-color: #4a90e2;
+      cursor: pointer;
+    }
+    #${DRAWER_ID} .bp-cust-revert-tint {
+      grid-column: 1 / -1;
     }
     #${DRAWER_ID} .bp-cust-list-heading {
       font-size: 10px; text-transform: uppercase;

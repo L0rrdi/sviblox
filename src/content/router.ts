@@ -30,10 +30,15 @@ import * as favoritesPageEnhancer from './favoritesPageEnhancer';
 import * as customizeApplier from './customizeApplier';
 import * as customizeMode from './customizeMode';
 import * as customizeMenuEntry from './customizeMenuEntry';
+import { install as installBannedProfileTrap } from './bannedProfileTrap';
 
 themesPage.install();
 uhblPage.install();
 customizeMode.install();
+// Always-on click listener that stashes any clicked /users/{id}/profile
+// userId so terminatedProfileEnhancer can recover it after Roblox redirects
+// a banned profile to /request-error. Idempotent.
+installBannedProfileTrap();
 
 function dispatch(): void {
   void homeEnhancer.run();

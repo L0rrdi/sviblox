@@ -13,6 +13,14 @@ const DEFAULT_SLOTS: ThemeScheduleSlotConfig[] = [
   { id: 'evening', label: 'Evening', themeId: 'dark-blue', startsAt: '19:00' },
 ];
 
+/** Returns the canonical "freshly installed" theme schedule (disabled, 2 default slots). */
+export function getDefaultThemeSchedule(): ThemeSchedule {
+  return {
+    enabled: false,
+    slots: DEFAULT_SLOTS.map((slot) => ({ ...slot })),
+  };
+}
+
 // Keep in sync with PRESETS in themeInjector.ts. `classic-2016` is dev-only
 // (see the comment there); the conditional spread drops it from production
 // bundles via Vite tree-shaking so the schedule UI doesn't offer it either.

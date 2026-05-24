@@ -22,6 +22,13 @@ export interface ElementEdit {
    * target's icon slot; the browser handles loading either form.
    */
   iconDataUrl?: string;
+  /**
+   * Pre-tint copy of the uploaded icon. Set at upload/paste time alongside
+   * `iconDataUrl`; the tint pipeline then overwrites `iconDataUrl` while
+   * leaving this untouched, so users can revert the recolor via a single
+   * click without re-uploading. Cleared when icon is cleared.
+   */
+  originalIconDataUrl?: string;
   /** Built-in animated icon preset id, rendered as inline SVG by the applier. */
   iconPreset?: string;
   /**
@@ -36,6 +43,8 @@ export interface CustomButton {
   label: string;
   url: string;
   iconDataUrl?: string;
+  /** See ElementEdit.originalIconDataUrl. */
+  originalIconDataUrl?: string;
   iconPreset?: string;
 }
 
