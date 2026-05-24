@@ -14,6 +14,7 @@
 import { getSettings, onSettingsChanged, setSettings } from '@/storage/settingsStore';
 import {
   addCustomButton,
+  CustomizationSpec,
   ElementEdit,
   clearAllCustomizations,
   getCachedCustomizations,
@@ -21,6 +22,7 @@ import {
   onCustomizationsChanged,
   removeCustomButton,
   removeEntry,
+  restoreSpec,
   setEntry,
   setLeftNavOrder,
   updateCustomButton,
@@ -101,7 +103,7 @@ async function runAsync(): Promise<void> {
   // If active and the drawer was removed by something else (overlay handoff,
   // panic state), re-mount it.
   if (active && !document.getElementById(DRAWER_ID)) mountDrawer();
-  if (active) syncInlineOrderControls();
+  if (active) syncDragHandles();
 }
 
 function isCustomizeRoute(): boolean {
@@ -114,7 +116,7 @@ function enterMode(): void {
   document.addEventListener('click', clickInterceptor, true);
   document.addEventListener('keydown', keyHandler, true);
   mountDrawer();
-  syncInlineOrderControls();
+  syncDragHandles();
 }
 
 function exitMode(): void {
@@ -129,7 +131,8 @@ function exitMode(): void {
   document.removeEventListener('click', clickInterceptor, true);
   document.removeEventListener('keydown', keyHandler, true);
   document.getElementById(DRAWER_ID)?.remove();
-  cleanupInlineOrderControls();
+  cleanupDragHandles();
+  dismissToast();
   if (isCustomizeRoute()) {
     history.replaceState(history.state, '', location.pathname + location.search);
   }
@@ -138,7 +141,7 @@ function exitMode(): void {
 function clickInterceptor(e: MouseEvent): void {
   const drawer = document.getElementById(DRAWER_ID);
   if (drawer && drawer.contains(e.target as Node)) return; // drawer owns its events
-  if ((e.target as Element).closest?.('.bp-cust-inline-order')) return;
+  // (no inline order controls to exempt — drag-and-drop reorders instead)
   e.preventDefault();
   e.stopImmediatePropagation();
   const li = findCustomizableAncestor(e.target as Element);
@@ -254,19 +257,13 @@ function renderDrawer(): void {
   bindDrawerEvents(drawer);
 }
 
-function getSiblingTargets(el: HTMLElement): ReturnType<typeof tagAll> {
-  const parent = el.parentElement;
-  if (!parent) return [];
-  return tagAll().filter((target) => target.surface === 'leftnav' && target.el.parentElement === parent);
-}
-
 function getNavTargets(): ReturnType<typeof tagAll> {
   return tagAll().filter((target) => target.surface === 'leftnav');
 }
 
 function targetText(el: HTMLElement): string {
   const clone = el.cloneNode(true) as HTMLElement;
-  clone.querySelector('.bp-cust-inline-order')?.remove();
+  // (no inline order controls inside the LI — drag handles use attributes, not inner elements)
   return clone.textContent?.trim() ?? '';
 }
 
@@ -325,39 +322,166 @@ function renderAddButtonForm(): string {
   `;
 }
 
-function syncInlineOrderControls(): void {
+// HTML5 drag-and-drop for nav reorder. Replaces the prior hover-revealed
+// up/down arrow buttons. The whole LI is the drag target; clicking still
+// selects-for-edit because dragstart fires before click and we don't swallow
+// the click event in the drag handler.
+let draggingSourceId: string | null = null;
+const DRAG_BOUND_FLAG = 'bpCustDragBound';
+
+function syncDragHandles(): void {
   const targets = getNavTargets();
-  targets.forEach((target, index) => {
+  for (const target of targets) {
     const li = target.el;
     li.classList.add('bp-cust-inline-host');
-    let controls = li.querySelector<HTMLElement>(':scope > .bp-cust-inline-order');
-    if (!controls) {
-      controls = document.createElement('div');
-      controls.className = 'bp-cust-inline-order';
-      controls.innerHTML = `
-        <button type="button" data-inline-delta="-1" aria-label="Move up" title="Move up">↑</button>
-        <button type="button" data-inline-delta="1" aria-label="Move down" title="Move down">↓</button>
-      `;
-      for (const btn of controls.querySelectorAll<HTMLButtonElement>('button')) {
-        btn.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const delta = btn.dataset.inlineDelta === '-1' ? -1 : 1;
-          void moveById(customId(li), delta);
-        });
-      }
-      li.appendChild(controls);
-    }
-    controls.querySelector<HTMLButtonElement>('[data-inline-delta="-1"]')!.disabled = index === 0;
-    controls.querySelector<HTMLButtonElement>('[data-inline-delta="1"]')!.disabled = index === targets.length - 1;
-  });
+    li.setAttribute('draggable', 'true');
+    if (li.dataset[DRAG_BOUND_FLAG]) continue;
+    li.dataset[DRAG_BOUND_FLAG] = '1';
+    li.addEventListener('dragstart', onDragStart);
+    li.addEventListener('dragover', onDragOver);
+    li.addEventListener('dragleave', onDragLeave);
+    li.addEventListener('drop', onDrop);
+    li.addEventListener('dragend', onDragEnd);
+  }
 }
 
-function cleanupInlineOrderControls(): void {
-  for (const controls of document.querySelectorAll('.bp-cust-inline-order')) controls.remove();
-  for (const host of document.querySelectorAll('.bp-cust-inline-host')) {
-    host.classList.remove('bp-cust-inline-host');
+function cleanupDragHandles(): void {
+  for (const host of document.querySelectorAll<HTMLElement>('.bp-cust-inline-host')) {
+    host.classList.remove('bp-cust-inline-host', 'bp-cust-dragging', 'bp-cust-drag-over-top', 'bp-cust-drag-over-bottom');
+    host.removeAttribute('draggable');
+    if (host.dataset[DRAG_BOUND_FLAG]) {
+      host.removeEventListener('dragstart', onDragStart);
+      host.removeEventListener('dragover', onDragOver);
+      host.removeEventListener('dragleave', onDragLeave);
+      host.removeEventListener('drop', onDrop);
+      host.removeEventListener('dragend', onDragEnd);
+      delete host.dataset[DRAG_BOUND_FLAG];
+    }
   }
+  document.body.classList.remove('bp-customize-dragging');
+}
+
+function onDragStart(e: DragEvent): void {
+  const li = (e.currentTarget as HTMLElement);
+  draggingSourceId = customId(li);
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', draggingSourceId);
+  }
+  li.classList.add('bp-cust-dragging');
+  document.body.classList.add('bp-customize-dragging');
+}
+
+function onDragOver(e: DragEvent): void {
+  if (!draggingSourceId) return;
+  const li = e.currentTarget as HTMLElement;
+  if (customId(li) === draggingSourceId) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  const rect = li.getBoundingClientRect();
+  const above = e.clientY < rect.top + rect.height / 2;
+  // Clear any prior indicator on this LI before re-applying.
+  li.classList.remove('bp-cust-drag-over-top', 'bp-cust-drag-over-bottom');
+  li.classList.add(above ? 'bp-cust-drag-over-top' : 'bp-cust-drag-over-bottom');
+}
+
+function onDragLeave(e: DragEvent): void {
+  const li = e.currentTarget as HTMLElement;
+  // dragleave fires when the cursor enters a child — only clear if we're
+  // actually leaving the LI itself.
+  if (e.relatedTarget instanceof Node && li.contains(e.relatedTarget)) return;
+  li.classList.remove('bp-cust-drag-over-top', 'bp-cust-drag-over-bottom');
+}
+
+function onDrop(e: DragEvent): void {
+  const targetLi = e.currentTarget as HTMLElement;
+  e.preventDefault();
+  const above = targetLi.classList.contains('bp-cust-drag-over-top');
+  targetLi.classList.remove('bp-cust-drag-over-top', 'bp-cust-drag-over-bottom');
+  const sourceId = draggingSourceId ?? e.dataTransfer?.getData('text/plain') ?? null;
+  if (!sourceId) return;
+  if (sourceId === customId(targetLi)) return;
+  void performDrop(sourceId, customId(targetLi), above);
+}
+
+function onDragEnd(): void {
+  for (const li of document.querySelectorAll<HTMLElement>('.bp-cust-dragging, .bp-cust-drag-over-top, .bp-cust-drag-over-bottom')) {
+    li.classList.remove('bp-cust-dragging', 'bp-cust-drag-over-top', 'bp-cust-drag-over-bottom');
+  }
+  document.body.classList.remove('bp-customize-dragging');
+  draggingSourceId = null;
+}
+
+// ---------------------------------------------------------------------------
+// Undo toast for destructive actions
+// ---------------------------------------------------------------------------
+
+const TOAST_ID = 'bloxplus-customize-toast';
+const TOAST_MS = 5000;
+let toastTimer: number | undefined;
+
+function countTotal(spec: CustomizationSpec): number {
+  return Object.keys(spec.entries).length + (spec.customButtons?.length ?? 0);
+}
+
+/**
+ * Bottom-center toast with an Undo button. Replaces any existing toast so
+ * back-to-back destructive actions don't pile up. Auto-dismisses after
+ * TOAST_MS unless the user clicks Undo first.
+ */
+function showUndoToast(message: string, onUndo: () => void | Promise<void>): void {
+  document.getElementById(TOAST_ID)?.remove();
+  if (toastTimer !== undefined) {
+    window.clearTimeout(toastTimer);
+    toastTimer = undefined;
+  }
+  const toast = document.createElement('div');
+  toast.id = TOAST_ID;
+  toast.className = 'bp-cust-toast';
+  toast.setAttribute('role', 'status');
+  toast.innerHTML = `
+    <span class="bp-cust-toast-msg">${escapeHtml(message)}</span>
+    <button type="button" class="bp-cust-toast-undo" data-action="undo">Undo</button>
+    <button type="button" class="bp-cust-toast-dismiss" aria-label="Dismiss" data-action="dismiss">×</button>
+  `;
+  document.body.appendChild(toast);
+  toast.querySelector('[data-action="undo"]')?.addEventListener('click', () => {
+    void onUndo();
+    dismissToast();
+  });
+  toast.querySelector('[data-action="dismiss"]')?.addEventListener('click', () => dismissToast());
+  toastTimer = window.setTimeout(() => dismissToast(), TOAST_MS);
+}
+
+function dismissToast(): void {
+  if (toastTimer !== undefined) {
+    window.clearTimeout(toastTimer);
+    toastTimer = undefined;
+  }
+  document.getElementById(TOAST_ID)?.remove();
+}
+
+async function performDrop(sourceId: string, targetId: string, dropAbove: boolean): Promise<void> {
+  const siblings = getNavTargets();
+  const sourceIndex = siblings.findIndex((t) => t.id === sourceId);
+  const targetIndex = siblings.findIndex((t) => t.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+  const sourceTarget = siblings[sourceIndex];
+  const targetTarget = siblings[targetIndex];
+  const parent = sourceTarget.el.parentElement;
+  if (!parent || parent !== targetTarget.el.parentElement) return; // different sub-lists
+
+  // DOM move first (so applyOrder doesn't see stale order) then persist.
+  if (dropAbove) parent.insertBefore(sourceTarget.el, targetTarget.el);
+  else parent.insertBefore(sourceTarget.el, targetTarget.el.nextSibling);
+
+  // Compute the new order from the live DOM after the move.
+  const newOrder = getNavTargets()
+    .filter((t) => t.el.parentElement === parent)
+    .map((t) => t.id);
+  await setLeftNavOrder(newOrder);
+  syncDragHandles();
+  renderDrawer();
 }
 
 function renderActiveList(spec: ReturnType<typeof getCachedCustomizations>): string {
@@ -591,9 +715,14 @@ function bindDrawerEvents(drawer: HTMLElement): void {
     void handleAddCustomButton(drawer);
   });
   drawer.querySelector('[data-action="reset-all"]')?.addEventListener('click', () => {
-    if (confirm('Reset every customization? This clears all renames, hides, and icons.')) {
-      void clearAllCustomizations();
-    }
+    if (!confirm('Reset every customization? This clears all renames, hides, and icons.')) return;
+    // Snapshot BEFORE clearing so the Undo toast can restore the exact spec.
+    const snapshot = structuredClone(getCachedCustomizations()) as CustomizationSpec;
+    void clearAllCustomizations().then(() => {
+      showUndoToast(`Reset ${countTotal(snapshot)} customization${countTotal(snapshot) === 1 ? '' : 's'}.`, async () => {
+        await restoreSpec(snapshot);
+      });
+    });
   });
   drawer.querySelector('[data-action="reset-element"]')?.addEventListener('click', () => {
     if (!selectedId) return;
@@ -759,29 +888,6 @@ function normalizeCustomUrl(raw: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function moveById(id: string, delta: -1 | 1): Promise<void> {
-  const spec = await getCustomizations();
-  const el = resolveById(id, spec.entries[id]?.fallbackSelector);
-  if (!el) return;
-  const siblings = getSiblingTargets(el);
-  const index = siblings.findIndex((target) => target.id === id);
-  const nextIndex = index + delta;
-  if (index < 0 || nextIndex < 0 || nextIndex >= siblings.length) return;
-
-  const ordered = siblings.map((target) => target.id);
-  [ordered[index], ordered[nextIndex]] = [ordered[nextIndex], ordered[index]];
-
-  const parent = el.parentElement;
-  const other = siblings[nextIndex].el;
-  if (parent) {
-    if (delta < 0) parent.insertBefore(el, other);
-    else parent.insertBefore(other, el);
-  }
-  await setLeftNavOrder(ordered);
-  syncInlineOrderControls();
-  renderDrawer();
 }
 
 async function writeEdit(patch: Partial<ElementEdit>): Promise<void> {
@@ -983,46 +1089,24 @@ function ensureStyle(): void {
       cursor: crosshair;
       background: rgba(74, 144, 226, 0.14);
     }
+    /* Drag-and-drop reorder. Every nav LI is draggable in customize mode;
+     * the cursor signals it. Drop targets show a 2px accent line on the
+     * edge the drop will land at. The dragged LI fades to 40% opacity. */
     body.${BODY_CLASS} .bp-cust-inline-host {
       position: relative !important;
+      cursor: grab;
     }
-    body.${BODY_CLASS} .bp-cust-inline-order {
-      position: absolute;
-      right: 6px;
-      top: 50%;
-      transform: translateY(-50%);
-      display: flex;
-      gap: 4px;
-      opacity: 0;
-      pointer-events: none;
-      z-index: 20;
-      transition: opacity 100ms ease;
+    body.${BODY_CLASS}.bp-customize-dragging .bp-cust-inline-host {
+      cursor: grabbing;
     }
-    body.${BODY_CLASS} .bp-cust-inline-host:hover > .bp-cust-inline-order,
-    body.${BODY_CLASS} .bp-cust-inline-order:focus-within {
-      opacity: 1;
-      pointer-events: auto;
+    body.${BODY_CLASS} .bp-cust-dragging {
+      opacity: 0.4;
     }
-    body.${BODY_CLASS} .bp-cust-inline-order button {
-      width: 24px;
-      height: 24px;
-      padding: 0;
-      border: 1px solid rgba(255,255,255,0.22);
-      border-radius: 4px;
-      background: #1a1d24;
-      color: #fff;
-      cursor: pointer;
-      font-size: 13px;
-      line-height: 1;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.28);
+    body.${BODY_CLASS} .bp-cust-drag-over-top {
+      box-shadow: inset 0 2px 0 0 #4a90e2;
     }
-    body.${BODY_CLASS} .bp-cust-inline-order button:hover:not(:disabled) {
-      background: #4a90e2;
-      border-color: rgba(255,255,255,0.36);
-    }
-    body.${BODY_CLASS} .bp-cust-inline-order button:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
+    body.${BODY_CLASS} .bp-cust-drag-over-bottom {
+      box-shadow: inset 0 -2px 0 0 #4a90e2;
     }
 
     #${DRAWER_ID} {
@@ -1335,6 +1419,49 @@ function ensureStyle(): void {
     @media (max-width: 1100px) {
       #${DRAWER_ID} { width: 280px; }
     }
+
+    /* Undo toast — bottom-center, slides up, auto-dismisses after 5s. */
+    .bp-cust-toast {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%);
+      z-index: 99998;
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px;
+      background: #1a1d24;
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 8px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+      color: #fff;
+      font: 13px/1.4 inherit;
+      animation: bp-cust-toast-in 0.16s ease-out;
+    }
+    @keyframes bp-cust-toast-in {
+      from { transform: translate(-50%, 8px); opacity: 0; }
+      to { transform: translate(-50%, 0); opacity: 1; }
+    }
+    .bp-cust-toast-msg { white-space: nowrap; }
+    .bp-cust-toast-undo {
+      padding: 4px 10px;
+      background: #4a90e2;
+      color: #fff;
+      border: 0;
+      border-radius: 5px;
+      font: 600 12px/1 inherit;
+      cursor: pointer;
+    }
+    .bp-cust-toast-undo:hover { filter: brightness(1.1); }
+    .bp-cust-toast-dismiss {
+      width: 22px; height: 22px;
+      padding: 0;
+      background: transparent;
+      color: rgba(255,255,255,0.55);
+      border: 0;
+      font: 16px/1 inherit;
+      cursor: pointer;
+    }
+    .bp-cust-toast-dismiss:hover { color: #fff; }
   `;
   document.head.appendChild(style);
 }

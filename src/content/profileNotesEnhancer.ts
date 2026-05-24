@@ -138,10 +138,15 @@ function renderCard(userId: number): void {
   const anchor = findCardAnchor();
   if (!anchor) return;
   const ann = getAnnotation(userId);
-  const nickname = ann?.nickname ?? '';
-  const note = ann?.note ?? '';
-
+  // If a card already exists, prefer its live input values over the stored
+  // annotation — the user may be mid-type with an unsaved debounce pending.
+  // Rebuilding via innerHTML from `ann?.*` would silently drop those keystrokes.
   let card = document.getElementById(CARD_ID);
+  const liveNickname = card?.querySelector<HTMLInputElement>('[data-bp-nickname]')?.value;
+  const liveNote = card?.querySelector<HTMLTextAreaElement>('[data-bp-note]')?.value;
+  const nickname = liveNickname ?? ann?.nickname ?? '';
+  const note = liveNote ?? ann?.note ?? '';
+
   if (!card) {
     card = document.createElement('section');
     card.id = CARD_ID;

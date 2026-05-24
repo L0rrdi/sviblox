@@ -219,6 +219,22 @@ export async function clearAllCustomizations(): Promise<void> {
   await chrome.storage.local.set({ [KEY]: cache });
 }
 
+/**
+ * Restore a full spec snapshot — used by the "Undo" affordance after a
+ * Reset all. Skips the empty-strip pass since the snapshot has already been
+ * validated by virtue of having come out of storage.
+ */
+export async function restoreSpec(spec: CustomizationSpec): Promise<void> {
+  const next: CustomizationSpec = {
+    version: 1,
+    entries: { ...spec.entries },
+    leftNavOrder: spec.leftNavOrder,
+    customButtons: spec.customButtons,
+  };
+  cache = next;
+  await chrome.storage.local.set({ [KEY]: next });
+}
+
 export function onCustomizationsChanged(cb: (s: CustomizationSpec) => void): void {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes[KEY]) return;

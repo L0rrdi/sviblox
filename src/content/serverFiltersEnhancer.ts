@@ -19,7 +19,10 @@ const FILTER_MENU_ID = 'bloxplus-server-filters-menu';
 const TILE_DECORATED = 'data-bp-tile-decorated';
 const SORT_STATE_KEY = '__bpServerSortKey';
 const OBSERVER_FLAG = '__bpServerFiltersObserver';
-const BRIDGE_FLAG = '__bpFiberBridgeInstalled';
+// Misnamed historically as "bridge installed" — the actual main-world bridge
+// is registered via manifest.json. This flag guards the isolated-world
+// `bp-fiber-synced` *listener* registration only.
+const BRIDGE_LISTENER_FLAG = '__bpFiberBridgeSyncedListener';
 
 const AVATAR_CACHE_TTL_MS = 24 * 60 * 60_000;
 // Monotonic token bumped on every applySort start AND every clearFilter.
@@ -124,46 +127,79 @@ function toggleMenu(btn: HTMLElement): void {
   const menu = document.createElement('div');
   menu.id = FILTER_MENU_ID;
   menu.className = 'bp-server-filters-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'Server Filters');
 
   const heading = document.createElement('div');
   heading.className = 'bp-server-filters-heading';
   heading.textContent = 'Server Filters';
   menu.appendChild(heading);
 
+  const items: HTMLButtonElement[] = [];
   for (const f of FILTERS) {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'bp-server-filters-item';
     item.textContent = f.label;
     item.dataset.bpSortKey = f.key;
+    item.setAttribute('role', 'menuitem');
+    item.tabIndex = -1;
     item.addEventListener('click', () => {
       applySort(f.key);
       menu.remove();
     });
     menu.appendChild(item);
+    items.push(item);
   }
 
   document.body.appendChild(menu);
   positionMenu(menu, btn);
+  // Focus first item so keyboard users can act immediately.
+  items[0]?.focus();
 
-  // Dismiss on outside click / Esc.
+  // Dismiss on outside click / Esc; reposition on scroll/resize so the menu
+  // tracks the anchor button instead of visually disconnecting.
+  const reposition = () => positionMenu(menu, btn);
+  const teardown = () => {
+    menu.remove();
+    document.removeEventListener('mousedown', off);
+    document.removeEventListener('keydown', key);
+    window.removeEventListener('scroll', reposition, true);
+    window.removeEventListener('resize', reposition);
+  };
+  const off = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node) && e.target !== btn) teardown();
+  };
+  const key = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      teardown();
+      btn.focus();
+      return;
+    }
+    // Arrow-key navigation between items.
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const active = document.activeElement as HTMLElement | null;
+      const idx = items.indexOf(active as HTMLButtonElement);
+      const next = e.key === 'ArrowDown'
+        ? (idx + 1) % items.length
+        : (idx - 1 + items.length) % items.length;
+      e.preventDefault();
+      items[next].focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    }
+  };
+  // Defer one tick so the click that opened the menu doesn't immediately
+  // re-close it via the document-level mousedown handler.
   setTimeout(() => {
-    const off = (e: MouseEvent) => {
-      if (!menu.contains(e.target as Node) && e.target !== btn) {
-        menu.remove();
-        document.removeEventListener('mousedown', off);
-        document.removeEventListener('keydown', esc);
-      }
-    };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        menu.remove();
-        document.removeEventListener('mousedown', off);
-        document.removeEventListener('keydown', esc);
-      }
-    };
     document.addEventListener('mousedown', off);
-    document.addEventListener('keydown', esc);
+    document.addEventListener('keydown', key);
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
   }, 0);
 }
 
@@ -392,7 +428,9 @@ function buildSviTile(
   gauge.className = 'server-player-count-gauge border';
   const inner = document.createElement('div');
   inner.className = 'gauge-inner-bar border';
-  inner.style.width = max ? `${Math.round((playing / max) * 100)}%` : '0%';
+  // Clamp at 100% — Roblox briefly reports `playing > max` during fast joins,
+  // which would otherwise extend the bar past its container.
+  inner.style.width = max ? `${Math.min(100, Math.round((playing / max) * 100))}%` : '0%';
   gauge.appendChild(inner);
   details.appendChild(gauge);
 
@@ -459,6 +497,15 @@ function clearFilter(): void {
 
 // ---------- Per-tile decoration ----------
 
+// Tracks how many consecutive decorate passes have run without finding any
+// bridge-tagged tile. After N passes with the tiles present but unhydrated,
+// we fall back to fetching the Public servers API once and decorating from
+// that response — guards against silent fiber-bridge failure if Roblox
+// renames `gameInstances` on their React state.
+let unhydratedPasses = 0;
+let bridgeFallbackTried = false;
+const BRIDGE_FALLBACK_AFTER_PASSES = 5;
+
 function decorateAllTiles(): void {
   // Scoped to the NATIVE container only — our SviBlox tiles live in
   // #bp-svi-server-list and already include ping/share built-in. Decorating
@@ -467,15 +514,60 @@ function decorateAllTiles(): void {
   const tiles = document.querySelectorAll<HTMLLIElement>(
     '#rbx-public-game-server-item-container > li.rbx-public-game-server-item'
   );
-  if (!tiles.length) return;
-  // If no tile has been tagged by the bridge yet, kick the bridge to sync.
+  if (!tiles.length) {
+    unhydratedPasses = 0;
+    return;
+  }
   let anyTagged = false;
   for (const t of tiles) if (t.dataset.bpInstanceId) { anyTagged = true; break; }
-  if (!anyTagged) requestFiberSync();
+  if (anyTagged) {
+    unhydratedPasses = 0;
+    bridgeFallbackTried = false;
+  } else {
+    unhydratedPasses += 1;
+    requestFiberSync();
+    if (unhydratedPasses >= BRIDGE_FALLBACK_AFTER_PASSES && !bridgeFallbackTried) {
+      bridgeFallbackTried = true;
+      void hydrateTilesFromApi(tiles);
+    }
+  }
   for (const tile of tiles) {
     const instance = readInstanceFromTile(tile);
     decorateTile(tile, instance);
   }
+}
+
+/**
+ * Bridge fallback. Fetches the first page of the Public servers API and
+ * maps responses onto the visible tiles by matching the tile's instance
+ * id from the *tile's own fiber* — if that fiber walk fails too we just
+ * fill the first N tiles in order (best-effort, ping data shown anyway).
+ */
+async function hydrateTilesFromApi(tiles: NodeListOf<HTMLLIElement>): Promise<void> {
+  const placeId = parsePlaceId();
+  if (!placeId) return;
+  let servers: ServerInstance[];
+  try {
+    servers = await fetchServersUpTo(placeId, FETCH_PAGE_LIMIT);
+  } catch (e) {
+    console.warn('[SviBlox] fiber-bridge fallback fetch failed', e);
+    return;
+  }
+  if (!servers.length) return;
+  // Fill any tile still missing dataset.bpInstanceId with the matching
+  // server by position (the API order matches the displayed order on a
+  // freshly-refreshed page).
+  for (let i = 0; i < Math.min(tiles.length, servers.length); i++) {
+    const tile = tiles[i];
+    if (tile.dataset.bpInstanceId) continue;
+    const s = servers[i];
+    tile.dataset.bpInstanceId = s.id;
+    if (typeof s.ping === 'number') tile.dataset.bpPing = String(s.ping);
+    if (typeof s.playing === 'number') tile.dataset.bpPlaying = String(s.playing);
+    if (typeof s.maxPlayers === 'number') tile.dataset.bpMaxPlayers = String(s.maxPlayers);
+  }
+  // Re-decorate now that data's populated.
+  for (const tile of tiles) decorateTile(tile, readInstanceFromTile(tile));
 }
 
 function decorateTile(tile: HTMLLIElement, instance?: ServerInstance): void {
@@ -613,8 +705,8 @@ async function hydratePlayerAvatars(
 
 function installFiberBridgeOnce(): void {
   const w = window as unknown as Record<string, unknown>;
-  if (w[BRIDGE_FLAG]) return;
-  w[BRIDGE_FLAG] = true;
+  if (w[BRIDGE_LISTENER_FLAG]) return;
+  w[BRIDGE_LISTENER_FLAG] = true;
   // The main-world bridge is registered as a separate content script in
   // manifest.json (world: "MAIN"). Roblox's CSP blocks DOM-injected inline
   // scripts, so the bridge has to be a manifest-declared script.
@@ -753,8 +845,13 @@ function ensureStyle(): void {
       font: 600 13px/1.2 inherit;
       cursor: pointer;
     }
-    .bp-server-filters-item:hover {
+    .bp-server-filters-item:hover,
+    .bp-server-filters-item:focus-visible {
       background: rgba(255,255,255,0.10);
+      outline: none;
+    }
+    .bp-server-filters-item:focus-visible {
+      box-shadow: 0 0 0 2px rgba(74,144,226,0.55);
     }
     .bp-server-ping-line {
       margin-top: 4px;
