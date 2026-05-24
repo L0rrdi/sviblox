@@ -62,10 +62,25 @@ export function customId(el: HTMLElement): string {
   const anchor = el.querySelector('a');
   const href = anchor?.getAttribute('href')?.trim() ?? '';
   const text = el.textContent?.trim().slice(0, 40) ?? '';
-  const seed = href || text || el.outerHTML.slice(0, 80);
+  // Prefer href (very stable), then text (stable enough across redesigns).
+  // Falling back to outerHTML was brittle — React reorders class names and
+  // toggles aria attributes between renders, so the hash drifted and the
+  // same logical item would get a new id on a Roblox release.  Position-in-
+  // supported-parent is more stable for the small set of unlabelled items
+  // (icon-only buttons): they keep their slot in the nav even if React
+  // shuffles classes.
+  const seed = href || text || positionalSeed(el);
   const id = `${surface}::${djb2(seed)}`;
   el.dataset.bpCustId = id;
   return id;
+}
+
+function positionalSeed(el: HTMLElement): string {
+  const parent = el.parentElement;
+  if (!parent) return el.tagName.toLowerCase();
+  const index = Array.from(parent.children).indexOf(el);
+  const parentSel = supportedParentSelector(el) ?? el.tagName.toLowerCase();
+  return `pos:${parentSel}:${index}`;
 }
 
 /**

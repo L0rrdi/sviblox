@@ -16,7 +16,9 @@ const BACKUP_LOCAL_KEYS = [
 
 const BACKUP_SYNC_KEYS = ['bloxplus.settings'] as const;
 const PLAYTIME_BACKUP_KEY = 'bloxplus.playtime';
-const LAST_PRE_IMPORT_BACKUP_KEY = 'bloxplus.lastPreImportBackup';
+const LAST_PRE_IMPORT_BACKUP_KEY = 'bloxplus.lastPreImportBackup'; // legacy single-slot; migrated lazily
+const PRE_IMPORT_BACKUPS_KEY = 'bloxplus.preImportBackups';
+const PRE_IMPORT_BACKUP_MAX = 3;
 
 interface BackupFile {
   version: 1;
@@ -99,12 +101,11 @@ function DataBackups() {
   const settingsFileRef = useRef<HTMLInputElement>(null);
   const playtimeFileRef = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState<PendingImport | null>(null);
-  const [restore, setRestore] = useState<StoredPreImportBackup | null>(null);
+  const [restoreList, setRestoreList] = useState<StoredPreImportBackup[]>([]);
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const refreshRestore = async (): Promise<void> => {
-    const raw = await chrome.storage.local.get(LAST_PRE_IMPORT_BACKUP_KEY);
-    setRestore((raw[LAST_PRE_IMPORT_BACKUP_KEY] as StoredPreImportBackup | undefined) ?? null);
+    setRestoreList(await readPreImportBackups());
   };
 
   useEffect(() => {
@@ -150,11 +151,16 @@ function DataBackups() {
     });
   };
 
-  const restorePrevious = async (): Promise<void> => {
-    if (!restore) return;
-    if (!confirm(`Restore ${restore.label} from ${new Date(restore.savedAt).toLocaleString()}?`)) return;
-    await applyBackup(restore.file, restore.kind ?? inferBackupKind(restore.file));
+  const restoreFromHistory = async (entry: StoredPreImportBackup): Promise<void> => {
+    if (!confirm(`Restore ${entry.label} from ${new Date(entry.savedAt).toLocaleString()}?`)) return;
+    await applyBackup(entry.file, entry.kind ?? inferBackupKind(entry.file));
     setStatus({ kind: 'ok', text: 'Pre-import backup restored.' });
+  };
+
+  const dropFromHistory = async (savedAt: string): Promise<void> => {
+    const next = restoreList.filter((entry) => entry.savedAt !== savedAt);
+    await chrome.storage.local.set({ [PRE_IMPORT_BACKUPS_KEY]: next });
+    setRestoreList(next);
   };
 
   return (
@@ -222,15 +228,28 @@ function DataBackups() {
       )}
 
       <div className="adv-restore">
-        <div>
-          <strong>Restore last pre-import backup</strong>
-          <p>
-            {restore
-              ? `${restore.label}, saved ${new Date(restore.savedAt).toLocaleString()}`
-              : 'No pre-import backup saved yet.'}
-          </p>
+        <div className="adv-restore-head">
+          <strong>Pre-import backup history</strong>
+          <span className="adv-restore-meta">Last {PRE_IMPORT_BACKUP_MAX} kept · oldest drops on new import</span>
         </div>
-        <button disabled={!restore} onClick={() => void restorePrevious()}>Restore</button>
+        {restoreList.length === 0 ? (
+          <p className="adv-restore-empty">No pre-import backups saved yet.</p>
+        ) : (
+          <ul className="adv-restore-list">
+            {restoreList.map((entry) => (
+              <li key={entry.savedAt} className="adv-restore-row">
+                <div className="adv-restore-row-text">
+                  <strong>{entry.label}</strong>
+                  <span>{new Date(entry.savedAt).toLocaleString()}</span>
+                </div>
+                <div className="adv-restore-row-actions">
+                  <button onClick={() => void restoreFromHistory(entry)}>Restore</button>
+                  <button className="adv-secondary" onClick={() => void dropFromHistory(entry.savedAt)}>Drop</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {status && <div className={`adv-status adv-status-${status.kind}`}>{status.text}</div>}
@@ -260,7 +279,8 @@ const LOCAL_KEY_LABELS: Record<string, string> = {
   'bloxplus.userThemes': 'Theme presets (incl. images)',
   'bloxplus.playtime': 'Playtime entries',
   'bloxplus.uhbl.sheet': 'UHBL sheet snapshot',
-  'bloxplus.lastPreImportBackup': 'Pre-import restore backup',
+  'bloxplus.lastPreImportBackup': 'Pre-import restore backup (legacy)',
+  'bloxplus.preImportBackups': `Pre-import restore history (last ${PRE_IMPORT_BACKUP_MAX})`,
 };
 
 const CACHE_PREFIX = 'bloxplus.cache.';
@@ -359,8 +379,8 @@ function StorageManager() {
     await chrome.storage.local.remove('bloxplus.lastSeen');
   });
 
-  const dropPreImport = (): Promise<void> => runAction('Pre-import backup dropped', async () => {
-    await chrome.storage.local.remove('bloxplus.lastPreImportBackup');
+  const dropPreImport = (): Promise<void> => runAction('Pre-import backups dropped', async () => {
+    await chrome.storage.local.remove(['bloxplus.lastPreImportBackup', 'bloxplus.preImportBackups']);
   });
 
   const dropLegacyTheme = (): Promise<void> => runAction('Legacy custom theme dropped', async () => {
@@ -951,7 +971,34 @@ async function savePreImportBackup(kind: BackupKind, file: BackupFile): Promise<
     savedAt: new Date().toISOString(),
     file,
   };
-  await chrome.storage.local.set({ [LAST_PRE_IMPORT_BACKUP_KEY]: stored });
+  const history = await readPreImportBackups();
+  const next = [stored, ...history].slice(0, PRE_IMPORT_BACKUP_MAX);
+  await chrome.storage.local.set({ [PRE_IMPORT_BACKUPS_KEY]: next });
+  // Drop the legacy single-slot if present — fully migrated now.
+  await chrome.storage.local.remove(LAST_PRE_IMPORT_BACKUP_KEY);
+}
+
+/**
+ * Reads the history array, lazily migrating the legacy single-slot key into
+ * it on first read. Newest entries are first; the array is trimmed to
+ * PRE_IMPORT_BACKUP_MAX on every save.
+ */
+async function readPreImportBackups(): Promise<StoredPreImportBackup[]> {
+  const raw = await chrome.storage.local.get([PRE_IMPORT_BACKUPS_KEY, LAST_PRE_IMPORT_BACKUP_KEY]);
+  const arr = raw[PRE_IMPORT_BACKUPS_KEY];
+  if (Array.isArray(arr) && arr.length) {
+    return (arr as StoredPreImportBackup[]).filter(isStoredBackup);
+  }
+  const legacy = raw[LAST_PRE_IMPORT_BACKUP_KEY] as StoredPreImportBackup | undefined;
+  return isStoredBackup(legacy) ? [legacy] : [];
+}
+
+function isStoredBackup(v: unknown): v is StoredPreImportBackup {
+  return Boolean(
+    v && typeof v === 'object' &&
+    typeof (v as StoredPreImportBackup).savedAt === 'string' &&
+    (v as StoredPreImportBackup).file
+  );
 }
 
 function pickKnownKeys(source: Record<string, unknown>, allowed: string[]): Record<string, unknown> {
@@ -1144,7 +1191,16 @@ const advancedCss = `
   .adv-danger { background: rgba(217,83,79,0.22); border-color: rgba(217,83,79,0.42); color: #ffc0bd; }
   .adv-preview { margin-top: 14px; }
   .adv-preview ul { margin: 8px 0 0; padding-left: 18px; color: rgba(232,237,242,0.82); font-size: 13px; }
-  .adv-restore { margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .adv-restore { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .adv-restore-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .adv-restore-meta { font-size: 11px; color: rgba(232,237,242,0.50); }
+  .adv-restore-empty { font-size: 13px; color: rgba(232,237,242,0.55); margin: 0; }
+  .adv-restore-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .adv-restore-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; }
+  .adv-restore-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .adv-restore-row-text strong { font-size: 13px; }
+  .adv-restore-row-text span { font-size: 11px; color: rgba(232,237,242,0.55); }
+  .adv-restore-row-actions { display: flex; gap: 8px; }
   .adv-status { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; }
   .adv-status-ok { background: rgba(46,178,76,0.14); border: 1px solid rgba(46,178,76,0.36); color: #b7efc3; }
   .adv-status-err { background: rgba(217,83,79,0.14); border: 1px solid rgba(217,83,79,0.40); color: #ffc0bd; }

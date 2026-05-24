@@ -218,35 +218,49 @@ function hideOverlay(): void {
 
 function renderOverlay(): void {
   let overlay = document.getElementById(OVERLAY_ID);
+  const firstMount = !overlay;
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.id = OVERLAY_ID;
     overlay.setAttribute('role', 'dialog');
     overlay.setAttribute('aria-label', 'SviBlox hotkeys');
+    // The outer wrapper carries the fade-in keyframe; build the card chrome
+    // exactly once so subsequent renders don't restart any animations.
+    overlay.innerHTML = `
+      <div class="bp-hotkey-card">
+        <header class="bp-hotkey-header">
+          <strong>Keybinds</strong>
+          <span class="bp-hotkey-hint">release to dismiss</span>
+        </header>
+        <div class="bp-hotkey-body"></div>
+      </div>
+    `;
     document.body.appendChild(overlay);
   }
+  // Re-render only the rows body — leaves the fade animation + card chrome
+  // intact across updates while folders/settings change behind the overlay.
+  const body = overlay.querySelector('.bp-hotkey-body');
+  if (body) body.innerHTML = renderRowsHtml(gatherRows());
+  // `firstMount` left for future debugging — fade is on the outer node.
+  void firstMount;
+}
 
-  const rows = gatherRows();
-  const rowsHtml = rows.length
-    ? rows
-        .map(
-          (r) => `
-            <div class="bp-hotkey-row${r.disabled ? ' bp-hotkey-row-disabled' : ''}">
-              <kbd class="bp-hotkey-key">${escapeHtml(r.key)}</kbd>
-              <span class="bp-hotkey-label">${escapeHtml(r.label)}</span>
-            </div>
-          `
-        )
-        .join('')
-    : '<div class="bp-hotkey-empty">No bindings yet.</div>';
+function renderRowsHtml(rows: OverlayRow[]): string {
+  if (!rows.length) return '<div class="bp-hotkey-empty">No bindings yet.</div>';
+  const active = rows.filter((r) => !r.disabled);
+  const disabled = rows.filter((r) => r.disabled);
+  const section = (title: string, items: OverlayRow[]) => items.length
+    ? `<div class="bp-hotkey-section-title">${escapeHtml(title)}</div>` + items.map(rowHtml).join('')
+    : '';
+  if (!disabled.length) return active.map(rowHtml).join('');
+  return section('Active here', active) + section('Not active on this page', disabled);
+}
 
-  overlay.innerHTML = `
-    <div class="bp-hotkey-card">
-      <header class="bp-hotkey-header">
-        <strong>Keybinds</strong>
-        <span class="bp-hotkey-hint">release to dismiss</span>
-      </header>
-      <div class="bp-hotkey-body">${rowsHtml}</div>
+function rowHtml(r: OverlayRow): string {
+  return `
+    <div class="bp-hotkey-row${r.disabled ? ' bp-hotkey-row-disabled' : ''}">
+      <kbd class="bp-hotkey-key">${escapeHtml(r.key)}</kbd>
+      <span class="bp-hotkey-label">${escapeHtml(r.label)}</span>
     </div>
   `;
 }
@@ -355,6 +369,17 @@ function ensureOverlayStyle(): void {
       padding: 4px 0;
       color: rgba(255,255,255,0.45);
       font-size: 12px;
+    }
+    #${OVERLAY_ID} .bp-hotkey-section-title {
+      margin: 10px 0 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: rgba(255,255,255,0.42);
+    }
+    #${OVERLAY_ID} .bp-hotkey-section-title:first-child {
+      margin-top: 0;
     }
     .bp-hotkey-flash {
       animation: bp-hotkey-flash-keyframes 0.9s ease-out;
