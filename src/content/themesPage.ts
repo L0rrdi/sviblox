@@ -12,7 +12,7 @@
  * preset which becomes active.
  */
 
-import { getSettings, setSettings } from '@/storage/settingsStore';
+import { getSettings, onSettingsChanged, setSettings } from '@/storage/settingsStore';
 import {
   getCustomTheme,
   getUserThemes,
@@ -23,7 +23,7 @@ import {
   suggestNextUserTheme,
   setCustomThemeBackground,
   removeCustomThemeBackground,
-  clearCustomTheme,
+  onUserThemesChanged,
 } from '@/storage/themeStore';
 import {
   getPresets,
@@ -43,10 +43,24 @@ const PAGE_ID = 'bloxplus-themes-page';
 const STYLE_ID = 'bloxplus-themes-page-style';
 const MODAL_ID = 'bloxplus-themes-modal';
 const HIDE_ATTR = 'data-bp-themes-hidden';
-const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+const HIDE_PRIOR_DISPLAY_ATTR = 'data-bp-themes-prior-display';
+// Cap at 4 MB raw — data-URL encoding inflates by ~33% so the persisted size
+// is ~5.3 MB per preset. Previously 16 MB, which produced ~21 MB blobs per
+// preset and ate local storage fast once multi-preset themes shipped.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 function isThemesRoute(): boolean {
   return location.hash.replace(/^#/, '') === 'bloxplus-themes';
+}
+
+/**
+ * Home is the only path where the overlay should mount. Without this guard,
+ * landing on /games/123#bloxplus-themes would replace the game page's main
+ * content with the Themes overlay (the host-finder falls back to `main` if
+ * #HomeContainer isn't present).
+ */
+function isHomePath(): boolean {
+  return location.pathname === '/' || location.pathname.startsWith('/home');
 }
 
 function ensureStyle(): void {
@@ -304,6 +318,10 @@ function hideHomeContent(host: HTMLElement): void {
     if (child.id === PAGE_ID) continue;
     if (SIBLING_OVERLAY_IDS.includes(child.id)) continue;
     if (!child.hasAttribute(HIDE_ATTR)) {
+      // Stash the original inline `display` so restoreHomeContent can put
+      // it back exactly. Most Roblox children have no inline display, so
+      // the stash is usually an empty string — fine.
+      child.setAttribute(HIDE_PRIOR_DISPLAY_ATTR, child.style.display);
       child.style.display = 'none';
       child.setAttribute(HIDE_ATTR, '1');
     }
@@ -315,7 +333,10 @@ function restoreHomeContent(): void {
     OVERLAY_HASHES.includes(location.hash.replace(/^#/, '')) && !isThemesRoute();
   for (const el of document.querySelectorAll(`[${HIDE_ATTR}]`)) {
     if (!(el instanceof HTMLElement)) continue;
-    if (!handoff) el.style.display = '';
+    if (!handoff) {
+      el.style.display = el.getAttribute(HIDE_PRIOR_DISPLAY_ATTR) ?? '';
+      el.removeAttribute(HIDE_PRIOR_DISPLAY_ATTR);
+    }
     el.removeAttribute(HIDE_ATTR);
   }
 }
@@ -863,19 +884,35 @@ async function render(page: HTMLElement): Promise<void> {
     markDirty();
   });
 
-  const saveSchedule = async (nextSchedule: ThemeSchedule): Promise<void> => {
+  const saveSchedule = async (
+    nextSchedule: ThemeSchedule,
+    options: { rebuild?: boolean } = {}
+  ): Promise<void> => {
     const sanitized = sanitizeThemeSchedule(nextSchedule, userThemes);
     const resolution = resolveThemeSchedule({ ...settings, themeSchedule: sanitized }, userThemes);
     await setSettings({
       themeSchedule: sanitized,
       ...(sanitized.enabled && resolution ? { themeId: resolution.themeId } : {}),
     });
-    await render(page);
+    if (options.rebuild) {
+      await render(page);
+      return;
+    }
+    // For label/time/theme tweaks the slot DOM already reflects the user's
+    // input — only the schedule-note text needs refreshing. Re-rendering the
+    // whole page here would steal focus from the input the user just left.
+    const noteEl = page.querySelector<HTMLElement>('.bp-schedule-note');
+    if (noteEl) {
+      noteEl.textContent =
+        sanitized.enabled && resolution
+          ? `Currently using ${scheduleChoices.find((c) => c.id === resolution.themeId)?.name ?? resolution.themeId} (${resolution.slotLabel}) until ${resolution.nextStartsAt}.`
+          : 'Schedule is off. Your selected preset stays active until you change it.';
+    }
   };
 
   page.querySelector<HTMLInputElement>('[data-schedule-enabled]')?.addEventListener('change', async (e) => {
     const enabled = (e.target as HTMLInputElement).checked;
-    await saveSchedule({ ...schedule, enabled });
+    await saveSchedule({ ...schedule, enabled }, { rebuild: true });
   });
 
   for (const select of page.querySelectorAll<HTMLSelectElement>('[data-schedule-theme]')) {
@@ -919,28 +956,34 @@ async function render(page: HTMLElement): Promise<void> {
 
   page.querySelector('[data-schedule-add]')?.addEventListener('click', async () => {
     const nextIndex = schedule.slots.length + 1;
-    await saveSchedule({
-      ...schedule,
-      slots: [
-        ...schedule.slots,
-        {
-          id: `slot-${Date.now().toString(36)}`,
-          label: `Slot ${nextIndex}`,
-          themeId: schedule.slots[schedule.slots.length - 1]?.themeId ?? 'default',
-          startsAt: `${String((7 + (nextIndex - 1) * 4) % 24).padStart(2, '0')}:00`,
-        },
-      ],
-    });
+    await saveSchedule(
+      {
+        ...schedule,
+        slots: [
+          ...schedule.slots,
+          {
+            id: `slot-${Date.now().toString(36)}`,
+            label: `Slot ${nextIndex}`,
+            themeId: schedule.slots[schedule.slots.length - 1]?.themeId ?? 'default',
+            startsAt: `${String((7 + (nextIndex - 1) * 4) % 24).padStart(2, '0')}:00`,
+          },
+        ],
+      },
+      { rebuild: true }
+    );
   });
 
   for (const btn of page.querySelectorAll<HTMLButtonElement>('[data-schedule-remove]')) {
     btn.addEventListener('click', async () => {
       const slotId = btn.dataset.scheduleRemove;
       if (!slotId || schedule.slots.length <= 2) return;
-      await saveSchedule({
-        ...schedule,
-        slots: schedule.slots.filter((slot) => slot.id !== slotId),
-      });
+      await saveSchedule(
+        {
+          ...schedule,
+          slots: schedule.slots.filter((slot) => slot.id !== slotId),
+        },
+        { rebuild: true }
+      );
     });
   }
 
@@ -971,7 +1014,10 @@ async function render(page: HTMLElement): Promise<void> {
       defaultValue: suggestion.name,
       confirmLabel: 'Create',
     });
-    if (name == null) return;
+    if (name == null) {
+      setStatus('Apply cancelled — your edits are still pending.');
+      return;
+    }
     const created = await createUserTheme(name, draft);
     await setSettings(activationPatch(created.id));
     setPreviewTheme(null);
@@ -982,11 +1028,8 @@ async function render(page: HTMLElement): Promise<void> {
 
   // If we were called via re-render mid-edit, restore the dirty bar state.
   markDirty();
-
-  // `clearCustomTheme` is exported from themeStore but isn't called here
-  // anymore — kept around in case the legacy "Reset palette" entry-point
-  // wants a hard wipe; reference it so unused-imports doesn't trip.
-  void clearCustomTheme;
+  // Snapshot for the maybeRerenderForSettings short-circuit.
+  lastRenderedThemeId = activeId;
 }
 
 function fileToDataUrl(f: File): Promise<string> {
@@ -1027,7 +1070,7 @@ export function run(): void {
 
 async function runAsync(host: HTMLElement): Promise<void> {
   const settings = await getSettings();
-  const allowed = settings.showThemes && isThemesRoute();
+  const allowed = settings.showThemes && isThemesRoute() && isHomePath();
   if (!allowed) {
     const page = document.getElementById(PAGE_ID);
     if (page) {
@@ -1042,10 +1085,38 @@ async function runAsync(host: HTMLElement): Promise<void> {
   void mountPage(host);
 }
 
+/**
+ * Tracks the themeId that the current rendered page represents. When
+ * onSettingsChanged fires for a reason that didn't move the active theme
+ * (the user just tweaked a schedule slot's label/time/theme), skip the
+ * full re-render — the schedule form already reflects what the user
+ * typed, and a re-render would steal focus.
+ */
+let lastRenderedThemeId: string | null = null;
+
 let initialized = false;
 export function install(): void {
   if (initialized) return;
   initialized = true;
   window.addEventListener('hashchange', () => run());
   window.addEventListener('popstate', () => run());
+  // External-source updates (theme scheduler boundary, customize-mode preset
+  // creation, etc.) should refresh the page — but only when the user has no
+  // pending unsaved edits AND when something the page actually displays has
+  // changed. Schedule-only edits skip via the themeId compare below.
+  onSettingsChanged((s) => maybeRerenderForSettings(s));
+  onUserThemesChanged(() => maybeRerender());
+}
+
+function maybeRerenderForSettings(s: { themeId: string }): void {
+  if (s.themeId === lastRenderedThemeId) return; // schedule-only tweak
+  maybeRerender();
+}
+
+function maybeRerender(): void {
+  const page = document.getElementById(PAGE_ID);
+  if (!page || !isThemesRoute() || !isHomePath()) return;
+  // Dirty bar present means an Apply is pending — re-rendering would discard.
+  if (page.querySelector('.bp-draft-bar.bp-dirty')) return;
+  void render(page);
 }

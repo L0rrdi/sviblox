@@ -19,6 +19,7 @@ import { escapeHtml, escapeAttr } from '@/util/html';
 const PAGE_ID = 'bloxplus-uhbl-page';
 const STYLE_ID = 'bloxplus-uhbl-page-style';
 const HIDE_ATTR = 'data-bp-uhbl-hidden';
+const HIDE_PRIOR_DISPLAY_ATTR = 'data-bp-uhbl-prior-display';
 
 // Star banners pulled from the UHBL community sheet's STARDIV separator
 // rows so tier headings match the sheet visually. Each tier has its own
@@ -76,6 +77,15 @@ function isUhblRoute(): boolean {
   return location.hash.replace(/^#/, '') === 'bloxplus-uhbl';
 }
 
+/**
+ * Same /home guard as themesPage — without it, navigating to a non-home
+ * path with `#bloxplus-uhbl` in the URL would replace the underlying page's
+ * main content with the UHBL overlay (the host-finder falls back to `main`).
+ */
+function isHomePath(): boolean {
+  return location.pathname === '/' || location.pathname.startsWith('/home');
+}
+
 function findHomeContentHost(): HTMLElement | null {
   const root = document.getElementById('HomeContainer');
   if (root instanceof HTMLElement) return root;
@@ -92,6 +102,7 @@ function hideHomeContent(host: HTMLElement): void {
     if (child.id === PAGE_ID) continue;
     if (SIBLING_OVERLAY_IDS.includes(child.id)) continue;
     if (!child.hasAttribute(HIDE_ATTR)) {
+      child.setAttribute(HIDE_PRIOR_DISPLAY_ATTR, child.style.display);
       child.style.display = 'none';
       child.setAttribute(HIDE_ATTR, '1');
     }
@@ -105,7 +116,10 @@ function restoreHomeContent(): void {
     !isUhblRoute();
   for (const el of document.querySelectorAll(`[${HIDE_ATTR}]`)) {
     if (!(el instanceof HTMLElement)) continue;
-    if (!handoff) el.style.display = '';
+    if (!handoff) {
+      el.style.display = el.getAttribute(HIDE_PRIOR_DISPLAY_ATTR) ?? '';
+      el.removeAttribute(HIDE_PRIOR_DISPLAY_ATTR);
+    }
     el.removeAttribute(HIDE_ATTR);
   }
 }
@@ -119,7 +133,7 @@ export function run(): void {
 
 async function runAsync(host: HTMLElement): Promise<void> {
   const settings = await getSettings();
-  const allowed = settings.showUhbl && isUhblRoute();
+  const allowed = settings.showUhbl && isUhblRoute() && isHomePath();
   if (!allowed) {
     const page = document.getElementById(PAGE_ID);
     if (page) {
