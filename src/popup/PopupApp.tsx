@@ -218,21 +218,43 @@ function useApiStatus(): 'checking' | 'online' | 'offline' {
   return status;
 }
 
+interface SyncUsage {
+  totalBytes: number;
+  totalPct: number;
+  itemBytes: number;
+  itemPct: number;
+  /** The higher of totalPct / itemPct — drives the warning threshold. */
+  worstPct: number;
+}
+
 /**
- * Watches chrome.storage.sync usage. Each setSettings write triggers
- * a re-read. Critical so users near the 100 KB sync quota get warned
- * before silent write failures start (lots of nicknames, hotkeys,
- * custom themes are the usual culprits).
+ * Watches chrome.storage.sync usage. Tracks both total usage (vs 100 KB
+ * total quota) and the `bloxplus.settings` item alone (vs the 8 KB
+ * per-item quota — the binding constraint, since all our sync data
+ * lives in that one object). Either crossing 90% should warn the user
+ * before silent write failures start.
  */
-function useSyncUsage(_settings: Settings | null): { bytes: number; pct: number } | null {
-  const [usage, setUsage] = useState<{ bytes: number; pct: number } | null>(null);
+function useSyncUsage(): SyncUsage | null {
+  const [usage, setUsage] = useState<SyncUsage | null>(null);
   useEffect(() => {
     let cancelled = false;
-    const QUOTA = chrome.storage.sync.QUOTA_BYTES ?? 102400;
+    const TOTAL_QUOTA = chrome.storage.sync.QUOTA_BYTES ?? 102400;
+    const ITEM_QUOTA = chrome.storage.sync.QUOTA_BYTES_PER_ITEM ?? 8192;
     const probe = () => {
-      chrome.storage.sync.getBytesInUse(null, (bytes) => {
+      Promise.all([
+        chrome.storage.sync.getBytesInUse(null),
+        chrome.storage.sync.getBytesInUse('bloxplus.settings'),
+      ]).then(([totalBytes, itemBytes]) => {
         if (cancelled) return;
-        setUsage({ bytes, pct: Math.round((bytes / QUOTA) * 100) });
+        const totalPct = Math.round((totalBytes / TOTAL_QUOTA) * 100);
+        const itemPct = Math.round((itemBytes / ITEM_QUOTA) * 100);
+        setUsage({
+          totalBytes,
+          totalPct,
+          itemBytes,
+          itemPct,
+          worstPct: Math.max(totalPct, itemPct),
+        });
       });
     };
     probe();
@@ -241,13 +263,28 @@ function useSyncUsage(_settings: Settings | null): { bytes: number; pct: number 
       cancelled = true;
       chrome.storage.onChanged.removeListener(probe);
     };
-  }, [_settings]);
+  }, []);
   return usage;
 }
 
-function StatusStrip({ settings }: { settings: Settings | null }) {
+function openOptions(hash?: string): void {
+  const url = chrome.runtime.getURL('options.html') + (hash ? `#${hash}` : '');
+  if (chrome.windows?.create) {
+    void chrome.windows.create({
+      url,
+      type: 'popup',
+      width: 1120,
+      height: 820,
+      focused: true,
+    }).catch(() => chrome.runtime.openOptionsPage());
+    return;
+  }
+  chrome.runtime.openOptionsPage();
+}
+
+function StatusStrip() {
   const apiStatus = useApiStatus();
-  const usage = useSyncUsage(settings);
+  const usage = useSyncUsage();
   const apiClass =
     apiStatus === 'online' ? 'sv-status-ok' :
     apiStatus === 'offline' ? 'sv-status-bad' : 'sv-status-neutral';
@@ -256,10 +293,10 @@ function StatusStrip({ settings }: { settings: Settings | null }) {
     apiStatus === 'offline' ? 'Roblox API: unreachable' :
     'Roblox API: checking…';
   const usageClass = !usage ? 'sv-status-neutral' :
-    usage.pct >= 90 ? 'sv-status-bad' :
-    usage.pct >= 75 ? 'sv-status-warn' : 'sv-status-ok';
+    usage.worstPct >= 90 ? 'sv-status-bad' :
+    usage.worstPct >= 75 ? 'sv-status-warn' : 'sv-status-ok';
   const usageLabel = usage
-    ? `Sync storage: ${(usage.bytes / 1024).toFixed(1)} / 100 KB (${usage.pct}%)`
+    ? `Settings item: ${(usage.itemBytes / 1024).toFixed(1)} / 8 KB (${usage.itemPct}%) · Total sync: ${(usage.totalBytes / 1024).toFixed(1)} / 100 KB (${usage.totalPct}%)`
     : 'Sync storage: checking…';
   return (
     <div className="sv-status-strip">
@@ -268,11 +305,22 @@ function StatusStrip({ settings }: { settings: Settings | null }) {
         {apiStatus === 'offline' ? 'Offline' : apiStatus === 'online' ? 'Online' : '…'}
       </div>
       <div className={`sv-status-pill ${usageClass}`} title={usageLabel}>
-        Storage {usage ? `${usage.pct}%` : '…'}
+        Storage {usage ? `${usage.worstPct}%` : '…'}
       </div>
-      {usage && usage.pct >= 90 && (
+      {usage && usage.worstPct >= 90 && (
         <div className="sv-status-warning" role="alert">
-          Sync storage almost full — new settings changes may stop saving. Consider exporting then clearing old custom themes or nicknames.
+          <div>
+            {usage.itemPct >= 90
+              ? 'Your settings item is almost at the 8 KB per-item sync limit — new changes may stop saving. Trim unused hotkeys, schedule slots, or custom theme palettes.'
+              : 'Sync storage almost full — new settings changes may stop saving. Trim old custom themes or nicknames.'}
+          </div>
+          <button
+            type="button"
+            className="sv-status-warning-action"
+            onClick={() => openOptions('storage')}
+          >
+            Open storage manager
+          </button>
         </div>
       )}
     </div>
@@ -310,21 +358,6 @@ export function PopupApp() {
   const setSelect = async (key: StringSettingKey, value: string) => {
     const next = await setSettings({ [key]: value } as Partial<Settings>);
     setLocal(next);
-  };
-
-  const openOptions = () => {
-    const url = chrome.runtime.getURL('options.html');
-    if (chrome.windows?.create) {
-      void chrome.windows.create({
-        url,
-        type: 'popup',
-        width: 1120,
-        height: 820,
-        focused: true,
-      }).catch(() => chrome.runtime.openOptionsPage());
-      return;
-    }
-    chrome.runtime.openOptionsPage();
   };
 
   const renderFeature = (feature: FeatureRow) => (
@@ -403,11 +436,11 @@ export function PopupApp() {
   return (
     <div className="sv-popup">
       <style>{popupCss}</style>
-      <StatusStrip settings={settings} />
+      <StatusStrip />
       <section className="sv-panel">
         <div className="sv-title-row">
           <h1>General Features</h1>
-          <button className="sv-options" type="button" onClick={openOptions}>
+          <button className="sv-options" type="button" onClick={() => openOptions()}>
             Advanced options
           </button>
         </div>
@@ -997,6 +1030,23 @@ const popupCss = `
     color: #ffd1ce;
     font-size: 11px;
     line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sv-status-warning-action {
+    align-self: flex-start;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.18);
+    color: #fff;
+    border-radius: 5px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .sv-status-warning-action:hover {
+    background: rgba(255,255,255,0.16);
   }
   .sv-panel {
     min-height: 100%;

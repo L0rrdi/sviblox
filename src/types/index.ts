@@ -129,6 +129,14 @@ export interface Settings {
    * which is the master switch for the whole feature.
    */
   hideMostPlayedWidget: boolean;
+  /**
+   * Customize-mode-only: when true, items marked `hidden` render at low
+   * opacity (instead of `display: none`) while you're in customize mode, so
+   * you can find and un-hide them. Outside of customize mode they're still
+   * fully hidden. Off = hidden means hidden everywhere — useful if a soft-
+   * hidden item is still visually distracting.
+   */
+  customizeShowHiddenInMode: boolean;
 }
 
 export type UhblTier = 'SS' | 'S' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'N/A';
@@ -193,4 +201,5 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   homeWidgetWindow: 'all',
   hideMostPlayedWidget: false,
+  customizeShowHiddenInMode: false,
 };
