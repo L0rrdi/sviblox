@@ -61,15 +61,6 @@ const FEATURES: FeatureRow[] = [
           { value: 'random', label: 'Random folder each refresh' },
         ],
       },
-      {
-        type: 'select',
-        key: 'foldersGamesSort',
-        label: 'Folder games order',
-        options: [
-          { value: 'most-active', label: 'Most active players first' },
-          { value: 'least-active', label: 'Least active players first' },
-        ],
-      },
     ],
   },
   {
