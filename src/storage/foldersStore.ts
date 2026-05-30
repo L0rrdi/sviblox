@@ -92,12 +92,14 @@ export async function removeGameFromFolder(folderId: string, universeId: number)
   await setFolders(state);
 }
 
-export function onFoldersChanged(cb: (state: FoldersState) => void): void {
-  chrome.storage.onChanged.addListener((changes, area) => {
+export function onFoldersChanged(cb: (state: FoldersState) => void): () => void {
+  const listener = (changes: Record<string, chrome.storage.StorageChange>, area: string): void => {
     if (area !== 'local' || !changes[KEY]) return;
     const v = changes[KEY].newValue as FoldersState | undefined;
     cb(v && Array.isArray(v.folders) ? v : { ...EMPTY });
-  });
+  };
+  chrome.storage.onChanged.addListener(listener);
+  return () => chrome.storage.onChanged.removeListener(listener);
 }
 
 function makeId(): string {

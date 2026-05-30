@@ -43,7 +43,8 @@ const ROOT_ID = 'bloxplus-banned-profile';
 const OBSERVER_FLAG = '__bpBannedObserverInstalled';
 
 let renderedForUserId: number | null = null;
-let inflight = false;
+let loadingKey: string | null = null;
+let loadSeq = 0;
 
 export async function run(): Promise<void> {
   installBannedTrap(); // idempotent; router also installs it as always-on.
@@ -54,18 +55,20 @@ export async function run(): Promise<void> {
   if (directMatch) {
     const userId = Number(directMatch[1]);
     if (Number.isFinite(userId)) {
-      await maybeRender(userId);
+      await maybeRender(userId, location.pathname);
     }
     return;
   }
 
   if (location.pathname === '/request-error') {
     const recovered = readRecentProfileNav();
-    if (recovered) await maybeRender(recovered);
+    if (recovered) await maybeRender(recovered, location.pathname);
     return;
   }
 
   // Left a profile context — clear local state so future visits re-render.
+  loadSeq += 1;
+  loadingKey = null;
   if (renderedForUserId !== null) {
     renderedForUserId = null;
     document.getElementById(ROOT_ID)?.remove();
@@ -84,12 +87,25 @@ function repairDeletedFriendCards(): void {
     'li.avatar-card.list-item[id]'
   );
   for (const li of cards) {
-    if (li.dataset.bpRepaired) continue;
-    if (!/^\d+$/.test(li.id)) continue;
+    const repairedFor = li.dataset.bpRepaired;
+    if (repairedFor && repairedFor !== li.id) {
+      li.querySelector('a.bp-banned-card-overlay')?.remove();
+      delete li.dataset.bpRepaired;
+    }
+    if (!/^\d+$/.test(li.id)) {
+      li.querySelector('a.bp-banned-card-overlay')?.remove();
+      delete li.dataset.bpRepaired;
+      continue;
+    }
     const container = li.querySelector<HTMLElement>('.avatar-card-container');
-    if (!container?.classList.contains('disabled')) continue;
+    if (!container?.classList.contains('disabled')) {
+      li.querySelector('a.bp-banned-card-overlay')?.remove();
+      delete li.dataset.bpRepaired;
+      continue;
+    }
+    if (li.dataset.bpRepaired === li.id) continue;
     if (li.querySelector('a.bp-banned-card-overlay')) continue;
-    li.dataset.bpRepaired = '1';
+    li.dataset.bpRepaired = li.id;
 
     if (getComputedStyle(li).position === 'static') li.style.position = 'relative';
     li.style.cursor = 'pointer';
@@ -124,20 +140,29 @@ function installFriendCardObserverOnce(): void {
       repairDeletedFriendCards();
     });
   });
-  obs.observe(document.documentElement, { childList: true, subtree: true });
+  obs.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['id', 'class'],
+  });
 }
 
-async function maybeRender(userId: number): Promise<void> {
+async function maybeRender(userId: number, path: string): Promise<void> {
   if (renderedForUserId === userId && document.getElementById(ROOT_ID)) return;
-  if (inflight) return;
-  inflight = true;
+  const key = `${path}:${userId}`;
+  if (loadingKey === key) return;
+  loadingKey = key;
+  const seq = ++loadSeq;
   try {
     let user = await getRobloxUser(userId);
+    if (isStale(seq, path, userId)) return;
 
     // Forgotten accounts can return 404 from the v1 endpoint. Fall back
     // to the combined-names API so we still have *some* identity to show.
     if (!user) {
       const combined = await getCombinedNames([userId]);
+      if (isStale(seq, path, userId)) return;
       const c = combined.get(userId);
       if (!c) return;
       user = {
@@ -154,24 +179,40 @@ async function maybeRender(userId: number): Promise<void> {
     if (!user.isBanned) return;
 
     renderedForUserId = userId;
-    await render(user);
+    await render(user, seq, path);
   } finally {
-    inflight = false;
+    if (loadingKey === key) loadingKey = null;
   }
+}
+
+function isStale(seq: number, path: string, userId: number): boolean {
+  if (seq !== loadSeq || location.pathname !== path) return true;
+  if (path === '/request-error') return readRecentProfileNav() !== userId;
+  return readProfileUserId() !== userId;
+}
+
+function readProfileUserId(): number | null {
+  const match = location.pathname.match(/^\/users\/(\d+)\/profile/);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isFinite(id) ? id : null;
 }
 
 // ---------- Render ----------
 
-async function render(user: RobloxUser): Promise<void> {
+async function render(user: RobloxUser, seq: number, path: string): Promise<void> {
   ensureStyle();
 
   // Prime profile annotations + read the toggle so the header can append the
   // private nickname (if any) right next to the displayName.
   const settings = await getSettings();
+  if (isStale(seq, path, user.id)) return;
   if (settings.showProfileNotes) await ensureAnnotationsPrimed();
+  if (isStale(seq, path, user.id)) return;
 
   // Wait for #content to mount; Roblox renders it as part of the SPA shell.
   const content = await waitFor<HTMLElement>(() => document.getElementById('content'));
+  if (isStale(seq, path, user.id)) return;
   if (!content) return;
 
   document.title = `${user.displayName} (@${user.name}) - Roblox`;
@@ -417,7 +458,6 @@ async function loadCurrentlyWearing(userId: number, host: HTMLElement): Promise<
   for (const id of assetIds) {
     const tile = el('a', { class: 'bp-term-tile', href: `/catalog/${id}/-` });
     tile.appendChild(thumbImg(thumbs.get(id), 'asset'));
-    host.appendChild(tile);
     grid.appendChild(tile);
   }
   host.appendChild(grid);

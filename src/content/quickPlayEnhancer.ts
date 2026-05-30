@@ -2,9 +2,10 @@
  * Adds a blue "Quick Play" button to game tiles across roblox.com.
  *
  * Where it appears:
- *   - On every native game tile (`.game-card-thumb-container`) that exposes
- *     a placeId via its `<a class="game-card-link">` href. Hidden by default,
- *     slides into the bottom-right corner on hover.
+ *   - On every native game tile (`.game-card-thumb-container` or featured
+ *     `.featured-game-icon-container`) that exposes a placeId via its
+ *     `<a class="game-card-link">` href. Hidden by default, slides into the
+ *     bottom-right corner on hover.
  *   - On the `searchAutocomplete` top-result row, where it's always visible
  *     (right edge of the row). That HTML is rendered by searchAutocomplete
  *     itself with class `bp-quickplay-btn bp-quickplay-search`.
@@ -58,26 +59,37 @@ function installDelegationOnce(): void {
 // ---------- Native tile decoration ----------
 
 function decorateNativeTiles(): void {
-  const tiles = document.querySelectorAll<HTMLElement>(
-    `.game-card-thumb-container:not([${DECORATED_ATTR}])`
+  const anchors = document.querySelectorAll<HTMLElement>(
+    '.game-card-thumb-container, .featured-game-icon-container'
   );
-  for (const thumb of tiles) {
-    const link = thumb.closest<HTMLAnchorElement>('a.game-card-link');
-    if (!link) continue;
+  for (const anchor of anchors) {
+    const link = anchor.closest<HTMLAnchorElement>('a.game-card-link');
+    if (!link) {
+      anchor.querySelector('.bp-quickplay-tile')?.remove();
+      anchor.removeAttribute(DECORATED_ATTR);
+      continue;
+    }
     const placeId = parsePlaceIdFromHref(link.href);
-    if (!placeId) continue;
+    if (!placeId) {
+      anchor.querySelector('.bp-quickplay-tile')?.remove();
+      anchor.removeAttribute(DECORATED_ATTR);
+      continue;
+    }
 
-    if (getComputedStyle(thumb).position === 'static') thumb.style.position = 'relative';
+    if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'bp-quickplay-btn bp-quickplay-tile';
+    let btn = anchor.querySelector<HTMLButtonElement>('.bp-quickplay-tile');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'bp-quickplay-btn bp-quickplay-tile';
+      btn.setAttribute('aria-label', 'Quick play');
+      btn.title = 'Quick play';
+      btn.innerHTML = ICON_HTML;
+    }
     btn.dataset.bpPlaceId = String(placeId);
-    btn.setAttribute('aria-label', 'Quick play');
-    btn.title = 'Quick play';
-    btn.innerHTML = ICON_HTML;
-    thumb.appendChild(btn);
-    thumb.setAttribute(DECORATED_ATTR, '1');
+    if (btn.parentElement !== anchor) anchor.appendChild(btn);
+    anchor.setAttribute(DECORATED_ATTR, String(placeId));
   }
 }
 

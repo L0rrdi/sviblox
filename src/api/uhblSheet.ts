@@ -11,7 +11,25 @@ const EDIT_URL =
   `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit?gid=${SHEET_GID}`;
 
 const STORAGE_KEY = 'bloxplus.uhbl.sheet';
+// Long-lived badgeId → media URL map. The bootstrap only exposes link
+// annotations for the first ~94 rows of the sheet, so a single fetch can
+// never cover higher tiers. By persisting every successful extraction and
+// merging across fetches, coverage grows monotonically over time — a badge
+// we extracted when it was inside the window keeps its video forever, even
+// after newer badges push it past the window. See CLAUDE.md "Bootstrap is
+// row-limited" for the underlying limitation.
+const MEDIA_MAP_KEY = 'bloxplus.uhbl.mediaMap';
+// Tracks when we last hit the heavy edit-HTML endpoint. The CSV is fetched
+// on every refresh (~30 KB, lets us notice add/remove). The edit HTML
+// (~500 KB) is only refetched when we have a reason — periodic catch-up,
+// new badges appeared, or the user clicked Refresh. See "Coverage grows
+// over time" in CLAUDE.md.
+const MEDIA_META_KEY = 'bloxplus.uhbl.mediaMeta';
 const FRESH_MS = 6 * 60 * 60_000;
+// How long the media-link extraction is good for. Set to 7 days as a
+// catch-up tick — we don't actually need it to be tight because the
+// mediaMap accumulates monotonically and curator URL changes are rare.
+const MEDIA_FRESH_MS = 7 * 24 * 60 * 60_000;
 const TIERS: ReadonlyArray<UhblTier> = ['SS', 'S', 'A', 'B', 'C', 'D', 'E', 'F', 'N/A'];
 
 interface SheetSnapshot {
@@ -27,6 +45,7 @@ interface FetchUrlResponse {
 }
 
 let inflight: Promise<UhblBadge[]> | null = null;
+let inflightForceEditFetch = false;
 
 /**
  * Returns the cached sheet immediately if present, otherwise fetches.
@@ -53,8 +72,36 @@ export async function loadUhblSheet(opts: { refresh?: boolean } = {}): Promise<{
   return { badges, fetchedAt: Date.now(), stale: false };
 }
 
+/**
+ * Triggers the SW to open the source sheet in a background tab. The
+ * content scripts on that tab (uhblSheetScraperMain.ts + Bridge.ts)
+ * intercept Google's lazy-loaded XHRs and merge captured link annotations
+ * into bloxplus.uhbl.mediaMap. Used by the UHBL page's "Sync videos"
+ * button. Resolves with before/after map sizes and the elapsed sync time.
+ */
+export async function syncUhblMediaViaTab(): Promise<{
+  before: number;
+  after: number;
+  durationMs: number;
+}> {
+  const resp = (await chrome.runtime.sendMessage({
+    type: 'bp-uhbl-sync-via-tab',
+    timeoutMs: 18_000,
+  })) as
+    | { ok: true; before: number; after: number; durationMs: number }
+    | { ok: false; error: string }
+    | undefined;
+  if (!resp || !resp.ok) {
+    throw new Error((resp && 'error' in resp ? resp.error : 'Sync failed'));
+  }
+  return { before: resp.before, after: resp.after, durationMs: resp.durationMs };
+}
+
 export async function refreshUhblSheet(): Promise<UhblBadge[]> {
-  return fetchAndStore();
+  // User-clicked refresh forces a fresh edit-HTML fetch alongside the CSV
+  // so a curator URL update / window shift is picked up on demand without
+  // waiting for the periodic tick.
+  return fetchAndStore({ forceEditFetch: true });
 }
 
 function refreshInBackground(): Promise<void> {
@@ -65,32 +112,81 @@ function refreshInBackground(): Promise<void> {
     });
 }
 
-async function fetchAndStore(): Promise<UhblBadge[]> {
-  if (inflight) return inflight;
-  inflight = (async () => {
-    // CSV is the authoritative list. The edit-view fetch is best-effort — if
-    // Google changes the bootstrap format we still show all badges, just
-    // without video buttons.
-    const [csv, editHtml] = await Promise.all([
+async function fetchAndStore(
+  opts: { forceEditFetch?: boolean } = {}
+): Promise<UhblBadge[]> {
+  const forceEditFetch = Boolean(opts.forceEditFetch);
+  if (inflight) {
+    const current = inflight;
+    if (!forceEditFetch || inflightForceEditFetch) return current;
+    await current.catch(() => undefined);
+    if (inflight && inflight !== current) return fetchAndStore(opts);
+  }
+  inflightForceEditFetch = forceEditFetch;
+  const current = (async () => {
+    // CSV every refresh (cheap, authoritative list). Edit HTML only when
+    // we have reason to fetch it — periodic catch-up, new badges in the
+    // CSV that weren't there last time, or the user explicitly asked.
+    const [csv, persistentMedia, mediaMeta, prevSnapshot] = await Promise.all([
       fetchViaServiceWorker(CSV_URL),
-      fetchViaServiceWorker(EDIT_URL).catch(() => null),
+      readMediaMap(),
+      readMediaMeta(),
+      readSnapshot(),
     ]);
     const badges = parseUhblCsv(csv);
-    if (editHtml) {
-      const videos = extractVideoUrls(editHtml);
-      for (const b of badges) {
-        const v = videos.get(b.badgeId);
-        if (v) b.videoUrl = v;
+    const currentIds = new Set(badges.map((b) => String(b.badgeId)));
+
+    const lastEditFetchedAt = mediaMeta?.lastEditFetchedAt ?? 0;
+    const editStale = Date.now() - lastEditFetchedAt >= MEDIA_FRESH_MS;
+    const prevIds = new Set(
+      (prevSnapshot?.badges ?? []).map((b) => String(b.badgeId))
+    );
+    const hasNewBadges = [...currentIds].some((id) => !prevIds.has(id));
+    const needsEdit = forceEditFetch || editStale || hasNewBadges;
+
+    // Merge: persistent map is the baseline. Newly-extracted URLs win
+    // (curator updates take effect).
+    const merged: Record<string, string> = { ...persistentMedia };
+    let didEditFetch = false;
+    if (needsEdit) {
+      const editHtml = await fetchViaServiceWorker(EDIT_URL).catch(() => null);
+      if (editHtml) {
+        const fresh = extractVideoUrls(editHtml);
+        for (const [badgeId, url] of fresh) {
+          merged[String(badgeId)] = url;
+        }
+        didEditFetch = true;
       }
     }
+    // Drop entries whose badge is no longer in the sheet (curator removals).
+    for (const key of Object.keys(merged)) {
+      if (!currentIds.has(key)) delete merged[key];
+    }
+    // Attach to badges.
+    for (const b of badges) {
+      const v = merged[String(b.badgeId)];
+      if (v) b.videoUrl = v;
+    }
+
     const snapshot: SheetSnapshot = { fetchedAt: Date.now(), badges };
-    await chrome.storage.local.set({ [STORAGE_KEY]: snapshot });
+    const writes: Promise<unknown>[] = [
+      chrome.storage.local.set({ [STORAGE_KEY]: snapshot }),
+      writeMediaMap(merged),
+    ];
+    if (didEditFetch) {
+      writes.push(writeMediaMeta({ lastEditFetchedAt: Date.now() }));
+    }
+    await Promise.all(writes);
     return badges;
   })();
+  inflight = current;
   try {
-    return await inflight;
+    return await current;
   } finally {
-    inflight = null;
+    if (inflight === current) {
+      inflight = null;
+      inflightForceEditFetch = false;
+    }
   }
 }
 
@@ -99,6 +195,39 @@ async function readSnapshot(): Promise<SheetSnapshot | null> {
   const v = r[STORAGE_KEY] as SheetSnapshot | undefined;
   if (!v || !Array.isArray(v.badges)) return null;
   return v;
+}
+
+async function readMediaMap(): Promise<Record<string, string>> {
+  const r = await chrome.storage.local.get(MEDIA_MAP_KEY);
+  const v = r[MEDIA_MAP_KEY];
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  // Defensive: only keep string→string entries in case a malformed write got in.
+  const out: Record<string, string> = {};
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof val === 'string' && val) out[k] = val;
+  }
+  return out;
+}
+
+async function writeMediaMap(map: Record<string, string>): Promise<void> {
+  await chrome.storage.local.set({ [MEDIA_MAP_KEY]: map });
+}
+
+interface MediaMeta {
+  lastEditFetchedAt: number;
+}
+
+async function readMediaMeta(): Promise<MediaMeta | null> {
+  const r = await chrome.storage.local.get(MEDIA_META_KEY);
+  const v = r[MEDIA_META_KEY];
+  if (!v || typeof v !== 'object') return null;
+  const ts = (v as { lastEditFetchedAt?: unknown }).lastEditFetchedAt;
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return null;
+  return { lastEditFetchedAt: ts };
+}
+
+async function writeMediaMeta(meta: MediaMeta): Promise<void> {
+  await chrome.storage.local.set({ [MEDIA_META_KEY]: meta });
 }
 
 async function fetchViaServiceWorker(url: string): Promise<string> {
@@ -119,9 +248,20 @@ async function fetchViaServiceWorker(url: string): Promise<string> {
  * Sheet hyperlinks are stored as cell-link annotations (FlatChange key "24")
  * in the embedded `bootstrapData` JSON. Within the chunk, cell-links appear
  * sequentially: each badge row contributes `badge_C` then optionally
- * `video_E` then `badge_J`. Pairing rule: for each badge link, if the next
- * link is non-Roblox, treat it as that badge's media URL. First occurrence
- * per badge wins (so col C's link is paired, not col J's).
+ * `video_E` then `badge_J`.
+ *
+ * Pairing rule (sandwich): for each non-badge link, look at the nearest
+ * preceding and nearest following badge links. If they share the same
+ * badge ID, the non-badge link is that badge's media URL. First occurrence
+ * per badge wins.
+ *
+ * Why sandwich instead of "next link wins": some rows in higher-difficulty
+ * tiers have col C un-linked (the badge name is plain text instead of a
+ * `=HYPERLINK(...)`). With "next wins", a row's col J link reaches forward
+ * into the *next* row's col E media URL, locking in a wrong pairing and
+ * shifting every subsequent badge by one. The sandwich rule rejects any
+ * non-badge link that doesn't sit between two links to the same badge,
+ * which matches the col_C/col_E/col_J layout exactly.
  *
  * If Google changes the bootstrap layout, this silently returns an empty
  * map and the rest of the sheet still loads.
@@ -194,12 +334,30 @@ export function extractVideoUrls(editHtml: string): Map<number, string> {
     const badgeMatch = raw.match(badgeRe);
     links.push({ isBadge: badgeMatch ? Number(badgeMatch[1]) : null, url: raw });
   }
+  // Precompute the nearest following badge ID at each position so the
+  // sandwich check is O(n) instead of O(n²).
+  const nextBadgeAt: (number | null)[] = new Array(links.length).fill(null);
+  let trailing: number | null = null;
+  for (let i = links.length - 1; i >= 0; i--) {
+    if (links[i].isBadge != null) trailing = links[i].isBadge;
+    nextBadgeAt[i] = trailing;
+  }
+
+  let prevBadge: number | null = null;
   for (let i = 0; i < links.length; i++) {
     const cur = links[i];
-    if (cur.isBadge == null) continue;
-    if (out.has(cur.isBadge)) continue; // skip col J duplicate of col C
-    const next = links[i + 1];
-    if (next && next.isBadge == null) out.set(cur.isBadge, next.url);
+    if (cur.isBadge != null) {
+      prevBadge = cur.isBadge;
+      continue;
+    }
+    const followingBadge = nextBadgeAt[i];
+    if (
+      prevBadge != null &&
+      prevBadge === followingBadge &&
+      !out.has(prevBadge)
+    ) {
+      out.set(prevBadge, cur.url);
+    }
   }
   return out;
 }

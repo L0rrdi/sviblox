@@ -256,10 +256,12 @@ function applyCollapsedState(section: HTMLElement): void {
 }
 
 function launchPlace(placeId: number): void {
-  // Roblox's CSP blocks inline scripts, so we cannot inject a bridge to call
-  // `Roblox.GameLauncher.joinMultiplayerGame` from the page world. Navigate to
-  // the subplace's page instead — the user can hit the native Play button there.
-  location.href = `/games/${placeId}`;
+  // Dispatch to the main-world bridge in fiberBridgeMain.ts, which calls
+  // Roblox.GameLauncher.joinMultiplayerGame directly and falls back to the
+  // /games/start URL if the launcher API isn't available.
+  document.dispatchEvent(
+    new CustomEvent('bp-quickplay', { detail: { placeId } })
+  );
 }
 
 function ensureStyle(): void {

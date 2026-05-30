@@ -16,25 +16,38 @@ const SEARCH_INPUT_SEL = '#navbar-search-input';
 const DROPDOWN_SEL = '.navbar-search .dropdown-menu';
 const DEBOUNCE_MS = 250;
 
-let installed = false;
+let installedInput: HTMLInputElement | null = null;
+let installPromise: Promise<void> | null = null;
+let searchObserver: MutationObserver | null = null;
 let debounceTimer: number | null = null;
 let inflightToken = 0;
 let lastQueriedKeyword: string | null = null;
 let lastResultHadRow = false;
 
 export function run(): void {
-  if (installed) return;
-  void install();
+  const input = document.querySelector<HTMLInputElement>(SEARCH_INPUT_SEL);
+  if (input) {
+    installForInput(input);
+    return;
+  }
+  if (!installPromise) {
+    installPromise = install().finally(() => {
+      installPromise = null;
+    });
+  }
 }
 
 async function install(): Promise<void> {
-  if (installed) return;
-
   const input = await waitFor<HTMLInputElement>(SEARCH_INPUT_SEL, 8000);
   if (!input) return;
+  installForInput(input);
+}
+
+function installForInput(input: HTMLInputElement): void {
+  if (input === installedInput) return;
   const searchContainer = input.closest<HTMLElement>('.navbar-search') ?? input.parentElement;
 
-  installed = true;
+  installedInput = input;
   ensureStyle();
 
   input.addEventListener('input', () => scheduleSearch(input.value));
@@ -44,10 +57,11 @@ async function install(): Promise<void> {
   // only the navbar-search subtree (NOT document.body) so we don't fire on
   // every page mutation. We only care about the dropdown appearing.
   if (searchContainer) {
-    const obs = new MutationObserver(() => {
+    searchObserver?.disconnect();
+    searchObserver = new MutationObserver(() => {
       if (input.value.trim()) ensureAnchoredOrSchedule(input.value);
     });
-    obs.observe(searchContainer, { childList: true, subtree: true });
+    searchObserver.observe(searchContainer, { childList: true, subtree: true });
   }
 }
 
@@ -55,6 +69,7 @@ function scheduleSearch(value: string): void {
   if (debounceTimer !== null) clearTimeout(debounceTimer);
   const keyword = value.trim();
   if (!keyword) {
+    inflightToken += 1;
     removeRow();
     lastQueriedKeyword = null;
     lastResultHadRow = false;

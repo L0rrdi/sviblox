@@ -1,5 +1,5 @@
 import { getAuthenticatedUserId, getCombinedNames } from '@/api/users';
-import { getMyFriends } from '@/api/friends';
+import { getMyFriends, FriendRow } from '@/api/friends';
 import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
 import { getGameInfo } from '@/api/games';
 import { getUserAvatarHeadshots, getGameIcons, getGroupIcons, getAssetThumbnails } from '@/api/thumbnails';
@@ -15,6 +15,19 @@ const STYLE_ID = 'bloxplus-mutuals-style';
 const INSTALLED_FLAG = '__bpMutualsInstalled';
 const HIDDEN_ATTR = 'data-bp-mutuals-hidden';
 const FRIEND_SAMPLE_LIMIT = 40;
+const FRIEND_SCAN_CONCURRENCY = 2;
+const FOLDER_GAMES_SCAN_CONCURRENCY = 2;
+// 60ms keeps the per-friend interval at ~6 req/s/worker which the games.*
+// favorites endpoint tolerates fine. Was 125ms — felt sluggish on accounts
+// with hundreds of friends. Re-entrance was the main "stuck" cause; this
+// is just a small smoothness bump on top.
+const FOLDER_GAMES_SCAN_DELAY_MS = 60;
+// After the main pass, retry rate-limited friends serially with a long
+// delay so the 429s clear. Two passes — second pass is more patient than
+// the first; if a friend still 429s after both, it's left as failed.
+const FOLDER_GAMES_RETRY_INITIAL_WAIT_MS = 1500;
+const FOLDER_GAMES_RETRY_DELAY_MS = 750;
+const HTML_CACHE_TTL_MS = 5 * 60_000;
 
 type MutualCategory = 'friends' | 'favorites' | 'groups' | 'items' | 'limiteds' | 'folder-games';
 type AcrossFriendsCategory = Exclude<MutualCategory, 'friends' | 'folder-games'>;
@@ -34,12 +47,29 @@ interface AggregateRow {
   detail?: string;
 }
 
+interface FolderGamesProgressState {
+  scanned: number;
+  total: number;
+  failed: number;
+  folderGamesCount: number;
+  rows: AggregateRow[];
+  rowsSignature: string;
+  /** Set during the retry phase for rate-limited friends from the main pass. */
+  retry?: { done: number; total: number };
+}
+
+interface LoadCategoryOptions {
+  onProgress?: (state: FolderGamesProgressState) => void;
+  isCancelled?: () => boolean;
+}
+
 let selectedCategory: MutualCategory = 'friends';
 let activeLoadId = 0;
 let renderedKey = '';
 let ownFriendsUserId: number | null = null;
 let ownFriendsUserIdLoad: Promise<void> | null = null;
-const htmlCache = new Map<string, string>();
+let initialMutualsDeepLinkRestored = false;
+const htmlCache = new Map<string, { html: string; ts: number }>();
 
 export function run(): void {
   const userId = readFriendsPageUserId();
@@ -56,6 +86,8 @@ export function run(): void {
   if (!tabs) return;
   ensureMutualsTab(tabs);
   resizeTabsToFit(tabs);
+
+  if (restoreInitialMutualsDeepLink()) return;
 
   if (!userId) {
     resolveOwnFriendsUserId();
@@ -153,6 +185,23 @@ function isMutualsRoute(): boolean {
   return location.hash === '#!/mutuals';
 }
 
+function restoreInitialMutualsDeepLink(): boolean {
+  if (initialMutualsDeepLinkRestored || isMutualsRoute()) return false;
+  const originalUrl = performance.getEntriesByType('navigation')[0]?.name;
+  if (!originalUrl) return false;
+  let originalHash = '';
+  try {
+    originalHash = new URL(originalUrl).hash;
+  } catch {
+    return false;
+  }
+  if (originalHash !== '#!/mutuals') return false;
+  initialMutualsDeepLinkRestored = true;
+  history.replaceState(history.state, '', `${location.pathname}#!/mutuals`);
+  run();
+  return true;
+}
+
 function goToMutuals(): void {
   if (location.hash !== '#!/mutuals') {
     history.pushState(history.state, '', `${location.pathname}#!/mutuals`);
@@ -242,39 +291,96 @@ function setMutualsActive(active: boolean): void {
 function showPanel(userId: number): void {
   const tabs = findTabs();
   if (!tabs) return;
+  if (selectedCategory === 'folder-games' && !shouldOfferFolderGames(userId)) {
+    selectedCategory = 'friends';
+  }
   hideNativeContent(tabs);
   const root = ensurePanel(tabs);
-  const key = `${userId}:${selectedCategory}:${location.pathname}`;
+  const path = location.pathname;
+  const key = `${userId}:${selectedCategory}:${path}`;
   if (renderedKey === key && root.dataset.bpLoaded === '1') return;
 
-  const cached = htmlCache.get(key);
-  renderShell(root, cached ?? loadingHtml());
+  // Re-entrance guard. The router's body MutationObserver fires on every
+  // DOM change — including our own progress-bar updates — so dispatch()
+  // gets called many times per second while a folder-games scan is in
+  // flight. Without this guard, each tick would wipe the in-progress UI
+  // and start a fresh scan from 0, which is why the progress bar appeared
+  // "stuck" partway. Once a load is running for this key, leave it alone.
+  if (root.dataset.bpLoadKey === key && root.dataset.bpLoaded === '0') return;
+
+  const loadId = ++activeLoadId;
+  const cached = readCachedHtml(key);
+  renderShell(root, cached ?? loadingHtml(), userId);
   if (cached) {
     renderedKey = key;
     root.dataset.bpLoaded = '1';
+    delete root.dataset.bpLoadKey;
     bindPanel(root, userId);
     bindImageFallbacks(root);
     return;
   }
 
-  const loadId = ++activeLoadId;
+  const category = selectedCategory;
+  const isLiveLoad = () =>
+    loadId === activeLoadId &&
+    isMutualsRoute() &&
+    location.pathname === path &&
+    readFriendsPageUserId() === userId;
   root.dataset.bpLoaded = '0';
+  root.dataset.bpLoadKey = key;
   bindPanel(root, userId);
-  void loadCategory(userId, selectedCategory)
+  let lastGridSignature: string | null = null;
+  void loadCategory(userId, category, {
+    isCancelled: () => !isLiveLoad(),
+    onProgress: (state) => {
+      if (!isLiveLoad()) return;
+      const results = root.querySelector<HTMLElement>('.bp-mutuals-results');
+      if (!results) return;
+      let progress = results.querySelector<HTMLElement>('.bp-mutuals-progress');
+      if (!progress) {
+        results.innerHTML = renderFolderGamesProgressShell(state);
+        progress = results.querySelector<HTMLElement>('.bp-mutuals-progress');
+        lastGridSignature = state.rowsSignature;
+        bindImageFallbacks(root);
+        return;
+      }
+      updateFolderGamesProgressInPlace(results, state);
+      if (lastGridSignature !== state.rowsSignature) {
+        lastGridSignature = state.rowsSignature;
+        bindImageFallbacks(root);
+      }
+    },
+  })
     .then((html) => {
-      if (loadId !== activeLoadId || !isMutualsRoute()) return;
-      htmlCache.set(key, html);
+      if (!isLiveLoad()) return;
+      htmlCache.set(key, { html, ts: Date.now() });
       renderedKey = key;
-      renderShell(root, html);
+      renderShell(root, html, userId);
       root.dataset.bpLoaded = '1';
+      delete root.dataset.bpLoadKey;
       bindPanel(root, userId);
       bindImageFallbacks(root);
     })
     .catch((e) => {
-      if (loadId !== activeLoadId || !isMutualsRoute()) return;
-      renderShell(root, emptyState(`Could not load mutuals: ${(e as Error).message}`));
+      if (!isLiveLoad()) return;
+      // Pin the error to this key so the re-entrance dispatch loop doesn't
+      // keep retrying — user can switch the category dropdown to retry.
+      renderedKey = key;
+      renderShell(root, emptyState(`Could not load mutuals: ${(e as Error).message}`), userId);
+      root.dataset.bpLoaded = '1';
+      delete root.dataset.bpLoadKey;
       bindPanel(root, userId);
     });
+}
+
+function readCachedHtml(key: string): string | null {
+  const cached = htmlCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.ts > HTML_CACHE_TTL_MS) {
+    htmlCache.delete(key);
+    return null;
+  }
+  return cached.html;
 }
 
 function ensurePanel(tabs: HTMLUListElement): HTMLElement {
@@ -293,7 +399,7 @@ function ensurePanel(tabs: HTMLUListElement): HTMLElement {
 function showPendingPanel(tabs: HTMLUListElement): void {
   hideNativeContent(tabs);
   const root = ensurePanel(tabs);
-  renderShell(root, loadingHtml());
+  renderShell(root, loadingHtml(), null);
 }
 
 function hideNativeContent(tabs: HTMLUListElement): void {
@@ -316,14 +422,18 @@ function restoreNativeContent(): void {
   }
 }
 
-function renderShell(root: HTMLElement, bodyHtml: string): void {
+function renderShell(root: HTMLElement, bodyHtml: string, userId: number | null): void {
+  const offerFolderGames = userId !== null && shouldOfferFolderGames(userId);
+  const folderOption = offerFolderGames
+    ? `<option value="folder-games"${selectedCategory === 'folder-games' ? ' selected' : ''}>Folder Games</option>`
+    : '';
   root.innerHTML = `
     <div class="container-header people-list-header bp-mutuals-header">
       <h2>Mutuals</h2>
       <select id="bp-mutuals-category" class="input-field form-control">
         <option value="friends"${selectedCategory === 'friends' ? ' selected' : ''}>Mutual Friends</option>
         <option value="favorites"${selectedCategory === 'favorites' ? ' selected' : ''}>Favorite Games</option>
-        <option value="folder-games"${selectedCategory === 'folder-games' ? ' selected' : ''}>Folder Games</option>
+        ${folderOption}
         <option value="groups"${selectedCategory === 'groups' ? ' selected' : ''}>Groups</option>
         <option value="items"${selectedCategory === 'items' ? ' selected' : ''}>Items</option>
         <option value="limiteds"${selectedCategory === 'limiteds' ? ' selected' : ''}>Limiteds</option>
@@ -333,16 +443,25 @@ function renderShell(root: HTMLElement, bodyHtml: string): void {
   `;
 }
 
+function shouldOfferFolderGames(userId: number): boolean {
+  return isOwnFriendsPagePath() || ownFriendsUserId === userId || readOwnFriendsUserId() === userId;
+}
+
 function bindPanel(root: HTMLElement, userId: number): void {
   root.querySelector<HTMLSelectElement>('#bp-mutuals-category')?.addEventListener('change', (e) => {
     const next = (e.currentTarget as HTMLSelectElement).value as MutualCategory;
     selectedCategory = next;
     renderedKey = '';
+    activeLoadId += 1;
     showPanel(userId);
   });
 }
 
-async function loadCategory(profileUserId: number, category: MutualCategory): Promise<string> {
+async function loadCategory(
+  profileUserId: number,
+  category: MutualCategory,
+  opts: LoadCategoryOptions = {}
+): Promise<string> {
   await ensureAnnotationsPrimed();
   const myId = await getAuthenticatedUserId();
   if (!myId) return emptyState('Sign in to compare mutuals.');
@@ -356,7 +475,7 @@ async function loadCategory(profileUserId: number, category: MutualCategory): Pr
 
   if (category === 'folder-games') {
     return isOwnProfile
-      ? renderFolderGamesAcrossFriends(myId)
+      ? renderFolderGamesAcrossFriends(myId, opts)
       : emptyState('Folder Games comparison is only available on your own friends page.');
   }
 
@@ -432,7 +551,7 @@ async function renderAcrossFriends(
     myRows.map((row) => [row.id, { ...row, count: 0, owners: [] }])
   );
 
-  await mapLimit(friends, 5, async (friend) => {
+  await mapLimit(friends, FRIEND_SCAN_CONCURRENCY, async (friend) => {
     const rows = await loadUserCategory(friend.id, category).catch(() => [] as AggregateRow[]);
     for (const row of rows) {
       const existing = byId.get(row.id);
@@ -453,7 +572,10 @@ async function renderAcrossFriends(
   return note + (await renderRows(rows, category));
 }
 
-async function renderFolderGamesAcrossFriends(myId: number): Promise<string> {
+async function renderFolderGamesAcrossFriends(
+  myId: number,
+  opts: LoadCategoryOptions = {}
+): Promise<string> {
   const { folders } = await getFolders();
   const seen = new Set<number>();
   const folderGames: FolderGame[] = [];
@@ -468,14 +590,21 @@ async function renderFolderGamesAcrossFriends(myId: number): Promise<string> {
     return emptyState("You don't have any games saved in folders yet.");
   }
 
-  const friends = await getMyFriends(myId);
-  if (!friends.length) return emptyState('No friends found to compare.');
+  const allFriends = await getMyFriends(myId);
+  if (!allFriends.length) return emptyState('No friends found to compare.');
+  const friends = allFriends;
 
-  const missingInfoIds = folderGames.filter((g) => !g.name || !g.placeId).map((g) => g.universeId);
-  const [friendNames, gameInfo] = await Promise.all([
-    getCombinedNames(friends.map((f) => f.id)),
-    missingInfoIds.length ? getGameInfo(missingInfoIds) : Promise.resolve(new Map()),
-  ]);
+  if (opts.isCancelled?.()) return loadingHtml();
+  const initialState = buildFolderGamesProgressState(
+    new Map(),
+    0,
+    friends.length,
+    0,
+    folderGames.length
+  );
+  opts.onProgress?.(initialState);
+
+  const friendNames = await getCombinedNames(friends.map((f) => f.id));
   const names = new Map(
     friends.map((f) => [
       f.id,
@@ -485,9 +614,8 @@ async function renderFolderGamesAcrossFriends(myId: number): Promise<string> {
 
   const byId = new Map<number, AggregateRow>();
   for (const g of folderGames) {
-    const info = gameInfo.get(g.universeId);
-    const placeId = g.placeId ?? info?.rootPlaceId;
-    const name = g.name || info?.name || `Game ${g.universeId}`;
+    const placeId = g.placeId;
+    const name = g.name || `Game ${g.universeId}`;
     byId.set(g.universeId, {
       id: g.universeId,
       name,
@@ -497,27 +625,211 @@ async function renderFolderGamesAcrossFriends(myId: number): Promise<string> {
     });
   }
 
-  await mapLimit(friends, 5, async (friend) => {
-    const favorites = await getFavoriteGames(friend.id, 100).catch(() => [] as FavoriteGame[]);
+  let failed = 0;
+  let scanned = 0;
+  let lastProgressAt = 0;
+  let lastRowsSignature = '';
+  let retryState: { done: number; total: number } | undefined;
+  const failedQueue: FriendRow[] = [];
+  const emitProgress = (force = false) => {
+    if (!opts.onProgress || opts.isCancelled?.()) return;
+    const now = Date.now();
+    const isFinal = scanned >= friends.length;
+    if (!force && !isFinal && !retryState) {
+      // Throttle to ~3 updates/sec to keep the bar smooth without thrashing
+      // the DOM. Always emit when the partial-match set changes so users see
+      // matches as they come in.
+      const sig = currentFolderGameSignature(byId);
+      const sameRows = sig === lastRowsSignature;
+      if (sameRows && now - lastProgressAt < 350) return;
+    }
+    lastProgressAt = now;
+    const state = buildFolderGamesProgressState(
+      byId,
+      scanned,
+      friends.length,
+      failed,
+      folderGames.length
+    );
+    if (retryState) state.retry = { ...retryState };
+    lastRowsSignature = state.rowsSignature;
+    opts.onProgress(state);
+  };
+
+  const applyFavorites = (friend: FriendRow, favorites: FavoriteGame[]): void => {
     for (const fav of favorites) {
       const row = byId.get(fav.id);
       if (!row) continue;
       row.count += 1;
       row.owners.push({ id: friend.id, name: names.get(friend.id) ?? friend.name });
     }
+  };
+
+  await mapLimit(friends, FOLDER_GAMES_SCAN_CONCURRENCY, async (friend) => {
+    if (opts.isCancelled?.()) return;
+    let ok = true;
+    const favorites = await getFavoriteGames(friend.id, 100, { retries: 1 }).catch(() => {
+      ok = false;
+      return [] as FavoriteGame[];
+    });
+    if (!ok) {
+      failed += 1;
+      failedQueue.push(friend);
+    } else {
+      applyFavorites(friend, favorites);
+    }
+    scanned += 1;
+    emitProgress();
+    await sleep(FOLDER_GAMES_SCAN_DELAY_MS);
   });
 
+  // Retry pass for rate-limited friends. Serial + patient — 429s clear
+  // within a second or two, so a slower retry usually succeeds. Each
+  // success decrements `failed` so the final note only reports friends
+  // that stayed 429'd through both passes.
+  if (!opts.isCancelled?.() && failedQueue.length > 0) {
+    const toRetry = failedQueue.splice(0);
+    retryState = { done: 0, total: toRetry.length };
+    emitProgress(true);
+    await sleep(FOLDER_GAMES_RETRY_INITIAL_WAIT_MS);
+    for (const friend of toRetry) {
+      if (opts.isCancelled?.()) break;
+      let retried: FavoriteGame[] | null = null;
+      try {
+        retried = await getFavoriteGames(friend.id, 100, { retries: 2 });
+      } catch {
+        retried = null;
+      }
+      if (retried) {
+        applyFavorites(friend, retried);
+        failed = Math.max(0, failed - 1);
+      }
+      retryState.done += 1;
+      emitProgress(true);
+      await sleep(FOLDER_GAMES_RETRY_DELAY_MS);
+    }
+    retryState = undefined;
+  }
+
+  if (opts.isCancelled?.()) return loadingHtml();
   const rows = [...byId.values()]
     .filter((r) => r.count > 0)
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
     .slice(0, 60);
-  if (!rows.length) {
-    return emptyState(
-      `None of your folder games are favorited by any of your ${friends.length} friends.`
-    );
+  const missingInfoIds = rows
+    .filter((row) => !folderGames.find((g) => g.universeId === row.id)?.placeId)
+    .map((row) => row.id);
+  const gameInfo = missingInfoIds.length ? await getGameInfo(missingInfoIds) : new Map();
+  for (const row of rows) {
+    const info = gameInfo.get(row.id);
+    if (!info) continue;
+    if (row.name === `Game ${row.id}`) row.name = info.name;
+    row.href = `/games/${info.rootPlaceId}`;
   }
-  const note = `<p class="bp-mutuals-note">Folder games your ${friends.length} friends have favorited.</p>`;
+
+  if (!rows.length) {
+    const scan = folderGamesScanNote(friends.length, failed);
+    return emptyState(`None of your folder games were found in the scanned friends' favorites.${scan ? ` ${scan}` : ''}`);
+  }
+  const note = `<p class="bp-mutuals-note">Folder games found in scanned friend favorites.${escapeHtml(folderGamesScanNote(friends.length, failed))}</p>`;
   return note + (await renderRows(rows, 'folder-games'));
+}
+
+function currentFolderGameRows(byId: Map<number, AggregateRow>, limit: number): AggregateRow[] {
+  return [...byId.values()]
+    .filter((row) => row.count > 0)
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+function currentFolderGameSignature(byId: Map<number, AggregateRow>): string {
+  return currentFolderGameRows(byId, 24)
+    .map((row) => `${row.id}:${row.count}`)
+    .join('|');
+}
+
+function buildFolderGamesProgressState(
+  byId: Map<number, AggregateRow>,
+  scanned: number,
+  total: number,
+  failed: number,
+  folderGamesCount: number
+): FolderGamesProgressState {
+  const rows = currentFolderGameRows(byId, 24);
+  return {
+    scanned,
+    total,
+    failed,
+    folderGamesCount,
+    rows,
+    rowsSignature: rows.map((row) => `${row.id}:${row.count}`).join('|'),
+  };
+}
+
+function folderGamesProgressPct(scanned: number, total: number): number {
+  if (!total) return 100;
+  return Math.max(2, Math.min(100, Math.round((scanned / total) * 100)));
+}
+
+function folderGamesNote(state: FolderGamesProgressState): string {
+  if (state.retry) {
+    const { done, total } = state.retry;
+    const noun = total === 1 ? 'friend' : 'friends';
+    return `Retrying ${total} rate-limited ${noun} (${done}/${total}). ${state.failed} still failing.`;
+  }
+  return `Scanning ${state.folderGamesCount} folder ${state.folderGamesCount === 1 ? 'game' : 'games'} across ${state.total} friends.${folderGamesScanNote(state.scanned, state.failed)}`;
+}
+
+function folderGamesGridHtml(rows: AggregateRow[]): string {
+  if (!rows.length) {
+    return '<div class="section-content-off bp-mutuals-progress-empty">Looking for matches...</div>';
+  }
+  return renderGrid(rows.map((row) => ({
+    ...row,
+    owners: [],
+    detail: `Shared with ${row.count} ${row.count === 1 ? 'friend' : 'friends'} so far`,
+  })));
+}
+
+function renderFolderGamesProgressShell(state: FolderGamesProgressState): string {
+  const pct = folderGamesProgressPct(state.scanned, state.total);
+  return `
+    <div class="bp-mutuals-progress" role="status" aria-live="polite">
+      <div class="bp-mutuals-progress-top">
+        <span class="bp-mutuals-progress-note">${escapeHtml(folderGamesNote(state))}</span>
+        <span class="bp-mutuals-progress-count">${state.scanned}/${state.total}</span>
+      </div>
+      <div class="bp-mutuals-progress-track">
+        <div class="bp-mutuals-progress-fill" style="width: ${pct}%"></div>
+      </div>
+    </div>
+    <div class="bp-mutuals-progress-grid" data-bp-rows-sig="${escapeAttr(state.rowsSignature)}">
+      ${folderGamesGridHtml(state.rows)}
+    </div>
+  `;
+}
+
+function updateFolderGamesProgressInPlace(
+  results: HTMLElement,
+  state: FolderGamesProgressState
+): void {
+  const note = results.querySelector<HTMLElement>('.bp-mutuals-progress-note');
+  if (note) note.textContent = folderGamesNote(state);
+  const count = results.querySelector<HTMLElement>('.bp-mutuals-progress-count');
+  if (count) count.textContent = `${state.scanned}/${state.total}`;
+  const fill = results.querySelector<HTMLElement>('.bp-mutuals-progress-fill');
+  if (fill) fill.style.width = `${folderGamesProgressPct(state.scanned, state.total)}%`;
+  const grid = results.querySelector<HTMLElement>('.bp-mutuals-progress-grid');
+  if (grid && grid.dataset.bpRowsSig !== state.rowsSignature) {
+    grid.dataset.bpRowsSig = state.rowsSignature;
+    grid.innerHTML = folderGamesGridHtml(state.rows);
+  }
+}
+
+function folderGamesScanNote(scanned: number, failed: number): string {
+  const parts = [`Scanned ${scanned} friend${scanned === 1 ? '' : 's'}`];
+  if (failed) parts.push(`${failed} favorite ${failed === 1 ? 'request' : 'requests'} failed or were rate-limited`);
+  return ` (${parts.join('; ')}).`;
 }
 
 async function loadUserCategory(
@@ -680,7 +992,12 @@ function fallbackThumb(row: AggregateRow): string {
 function bindImageFallbacks(root: HTMLElement): void {
   for (const img of root.querySelectorAll<HTMLImageElement>('img[data-bp-fallback]')) {
     img.addEventListener('error', () => {
+      const fallback = img.dataset.bpFallback ?? '';
+      const parent = img.parentElement;
       img.remove();
+      if (parent && fallback && !parent.textContent?.trim()) {
+        parent.textContent = fallback;
+      }
     });
   }
 }
@@ -708,6 +1025,10 @@ async function mapLimit<T>(
   await Promise.all(workers);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function ensureStyle(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement('style');
@@ -725,6 +1046,12 @@ function ensureStyle(): void {
     }
     #${ROOT_ID} .bp-mutuals-header {
       display: block;
+      position: relative;
+      z-index: 2;
+    }
+    #${ROOT_ID} .bp-mutuals-results {
+      position: relative;
+      z-index: 1;
     }
     #${ROOT_ID} #bp-mutuals-category,
     #${ROOT_ID} #bp-mutuals-category option {
@@ -791,6 +1118,34 @@ function ensureStyle(): void {
       font-size: 12px !important;
       opacity: 0.75 !important;
       line-height: 1.25 !important;
+    }
+    #${ROOT_ID} .bp-mutuals-progress {
+      margin: 14px 0 12px !important;
+      padding: 10px 12px !important;
+      border-radius: 6px !important;
+      background: rgba(255,255,255,0.06) !important;
+      color: inherit !important;
+    }
+    #${ROOT_ID} .bp-mutuals-progress-top {
+      display: flex !important;
+      justify-content: space-between !important;
+      gap: 12px !important;
+      font-size: 12px !important;
+      line-height: 1.3 !important;
+      opacity: 0.85 !important;
+    }
+    #${ROOT_ID} .bp-mutuals-progress-track {
+      margin-top: 8px !important;
+      height: 6px !important;
+      overflow: hidden !important;
+      border-radius: 999px !important;
+      background: rgba(0,0,0,0.3) !important;
+    }
+    #${ROOT_ID} .bp-mutuals-progress-fill {
+      height: 100% !important;
+      border-radius: inherit !important;
+      background: #8b5cf6 !important;
+      transition: width 180ms ease !important;
     }
     #${ROOT_ID} .bp-mutual-shared {
       margin-top: 4px !important;

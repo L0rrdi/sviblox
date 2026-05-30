@@ -181,6 +181,9 @@ export function ensureFavoritesStyle(): void {
   document.head.appendChild(style);
 }
 
+// One-shot per page load. Any failure that completes the first call also
+// counts — the MutationObserver would otherwise retry on every tick and
+// hammer the API after a 4xx. The user can refresh the page to retry.
 let favoritesLoaded = false;
 let favoritesSnapshot: HomeListSnapshot | null = null;
 
@@ -314,14 +317,7 @@ export function ensureFavoritesSection(): HTMLElement {
   return section;
 }
 
-/** Stops any future favorites fetches for this page lifetime. */
-let favoritesDisabled = false;
-
 async function loadFavorites(section: HTMLElement): Promise<void> {
-  if (favoritesDisabled) {
-    if (favoritesSnapshot) applyHomeListSnapshot(section, favoritesSnapshot);
-    return;
-  }
   const rowEl = section.querySelector('.bp-fav-row') as HTMLElement;
   const metaEl = section.querySelector('.bp-fav-meta') as HTMLElement;
 
@@ -350,9 +346,6 @@ async function loadFavorites(section: HTMLElement): Promise<void> {
       seeAllHref,
     };
     updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
-    // Do NOT retry — MutationObserver fires constantly and would loop.
-    // Only transient errors (no `HTTP` prefix in message) are worth retrying.
-    if (/HTTP\s\d/.test(msg)) favoritesDisabled = true;
     return;
   }
 
@@ -450,7 +443,8 @@ export function homeGameTileHtml(tile: HomeGameTile): string {
   const safeHref = escapeHtml(tile.href);
   // The Folder (+) overlay button sits next to the thumbnail and opens the
   // folder picker on click. data-bp-add-folder lets a single delegated
-  // listener handle every tile (see installTilesAddToFolderDelegation).
+  // listener in folderTileDecorator.ts (`installDelegation`) handle every
+  // tile site-wide.
   const folderPlusBtn =
     typeof tile.universeId === 'number'
       ? `<button type="button" class="bp-tile-add-folder${

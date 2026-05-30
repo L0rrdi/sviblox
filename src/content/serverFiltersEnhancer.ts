@@ -1,10 +1,9 @@
 /**
  * On `/games/{placeId}/...` Servers tab:
  *   - Inject a "Filters" dropdown next to the public-server "Refresh" button
- *     with sort options (Available Space, Max Players, Min Players, Random
- *     Shuffle, Best Connection).
+ *     with sort options (Available Space, Random Shuffle, Best Connection).
  *   - Decorate each visible server tile with a "Ping: Xms" line under the
- *     player gauge and a "Share" button next to "Join".
+ *     player gauge.
  *
  * Data source: Roblox's own React state. Walking up from a tile's fiber
  * exposes the parent component's `gameInstances` array, which contains the
@@ -29,6 +28,7 @@ const AVATAR_CACHE_TTL_MS = 24 * 60 * 60_000;
 // Lets stale fetches detect that they've been superseded / cancelled and
 // bail before writing into a sviList that may no longer be in the DOM.
 let sortSeq = 0;
+let activePlaceId: number | null = null;
 
 type SortKey = 'available' | 'shuffle' | 'best-ping';
 
@@ -54,9 +54,18 @@ const SVI_LIST_ID = 'bp-svi-server-list';
 const CLEAR_BTN_ID = 'bloxplus-server-filters-clear-btn';
 
 export function run(): void {
-  if (!parsePlaceId()) {
+  const placeId = parsePlaceId();
+  if (!placeId) {
     cleanup();
     return;
+  }
+  if (activePlaceId !== placeId) {
+    activePlaceId = placeId;
+    sortSeq++;
+    clearBackoffTimers();
+    clearSortUi(true);
+    unhydratedPasses = 0;
+    bridgeFallbackTried = false;
   }
   ensureStyle();
   installFiberBridgeOnce();
@@ -70,16 +79,27 @@ export function run(): void {
 
 let backoffTimers: number[] = [];
 function scheduleBackoffDecorate(): void {
-  for (const t of backoffTimers) clearTimeout(t);
-  backoffTimers = [];
+  clearBackoffTimers();
   for (const ms of [300, 800, 1600, 3000]) {
     backoffTimers.push(window.setTimeout(decorateAllTiles, ms));
   }
 }
 
+function clearBackoffTimers(): void {
+  for (const t of backoffTimers) clearTimeout(t);
+  backoffTimers = [];
+}
+
 function cleanup(): void {
-  document.getElementById(FILTER_BTN_ID)?.remove();
-  document.getElementById(FILTER_MENU_ID)?.remove();
+  sortSeq++;
+  activePlaceId = null;
+  clearBackoffTimers();
+  clearSortUi(true);
+  unhydratedPasses = 0;
+  bridgeFallbackTried = false;
+  containerObserver?.disconnect();
+  containerObserver = null;
+  observedContainer = null;
 }
 
 function parsePlaceId(): number | null {
@@ -92,9 +112,18 @@ function parsePlaceId(): number | null {
 // ---------- Filter button + menu ----------
 
 function injectFilterButton(): void {
-  if (document.getElementById(FILTER_BTN_ID)) return;
   const refreshBtn = findPublicRefreshButton();
-  if (!refreshBtn) return;
+  const existing = document.getElementById(FILTER_BTN_ID);
+  if (!refreshBtn) {
+    existing?.remove();
+    document.getElementById(CLEAR_BTN_ID)?.remove();
+    document.getElementById(FILTER_MENU_ID)?.remove();
+    return;
+  }
+  if (existing) {
+    if (existing.previousElementSibling !== refreshBtn) refreshBtn.insertAdjacentElement('afterend', existing);
+    return;
+  }
 
   const btn = document.createElement('button');
   btn.id = FILTER_BTN_ID;
@@ -109,13 +138,17 @@ function injectFilterButton(): void {
 }
 
 function findPublicRefreshButton(): HTMLElement | null {
-  // Two `.rbx-refresh` buttons on the page (friends + public). The public one
-  // lives inside the same options block as the public server item container.
+  // Two `.rbx-refresh` buttons can exist on the page (friends + public). Only
+  // bind when the public server container is mounted so the control cannot land
+  // in a different server block during tab transitions.
   const publicWrap = document.getElementById('rbx-public-running-games');
-  return (
-    publicWrap?.querySelector<HTMLElement>('.rbx-refresh') ||
-    document.querySelector<HTMLElement>('.rbx-refresh')
-  );
+  const fromWrap = publicWrap?.querySelector<HTMLElement>('.rbx-refresh');
+  if (fromWrap) return fromWrap;
+
+  const publicList = document.getElementById('rbx-public-game-server-item-container');
+  if (!publicList) return null;
+  const section = publicList.closest<HTMLElement>('.section-content, .container-main') ?? publicList.parentElement;
+  return section?.querySelector<HTMLElement>('.rbx-refresh') ?? null;
 }
 
 function toggleMenu(btn: HTMLElement): void {
@@ -229,11 +262,11 @@ async function applySort(key: SortKey): Promise<void> {
   try {
     servers = await fetchServersUpTo(placeId, FETCH_PAGES * FETCH_PAGE_LIMIT);
   } catch (e) {
-    if (sortSeq !== mySeq) return; // superseded / cancelled
+    if (isSortStale(mySeq, placeId, sviList)) return; // superseded / cancelled
     showError(sviList, `Couldn't fetch servers (${(e as Error).message}).`);
     return;
   }
-  if (sortSeq !== mySeq) return;
+  if (isSortStale(mySeq, placeId, sviList)) return;
   if (!servers.length) {
     showError(sviList, 'No public servers found.');
     return;
@@ -241,7 +274,15 @@ async function applySort(key: SortKey): Promise<void> {
 
   const sorted = sortServers(servers, key);
   const top = sorted.slice(0, TOP_N);
-  renderSviTiles(sviList, top, placeId, key);
+  renderSviTiles(sviList, top, placeId, key, mySeq);
+}
+
+function isSortStale(seq: number, placeId: number, sviList?: HTMLElement): boolean {
+  return (
+    sortSeq !== seq ||
+    parsePlaceId() !== placeId ||
+    (sviList !== undefined && (!sviList.isConnected || document.getElementById(SVI_LIST_ID) !== sviList))
+  );
 }
 
 function sortServers(servers: ServerInstance[], key: SortKey): ServerInstance[] {
@@ -337,6 +378,18 @@ function showNativeList(nativeList: HTMLElement): void {
   if (loadMore) loadMore.style.display = '';
 }
 
+function clearSortUi(includeFilterButton: boolean): void {
+  document.getElementById(FILTER_MENU_ID)?.remove();
+  if (includeFilterButton) document.getElementById(FILTER_BTN_ID)?.remove();
+  document.getElementById(CLEAR_BTN_ID)?.remove();
+  document.getElementById(SVI_LIST_ID)?.remove();
+  const nativeList = document.getElementById('rbx-public-game-server-item-container');
+  if (nativeList instanceof HTMLElement) {
+    flag(nativeList, null);
+    showNativeList(nativeList);
+  }
+}
+
 function showLoading(sviList: HTMLElement): void {
   sviList.innerHTML = '';
   const li = document.createElement('li');
@@ -357,7 +410,8 @@ function renderSviTiles(
   sviList: HTMLElement,
   servers: ServerInstance[],
   placeId: number,
-  sortKey: SortKey
+  sortKey: SortKey,
+  seq: number
 ): void {
   sviList.innerHTML = '';
   for (let i = 0; i < servers.length; i++) {
@@ -366,7 +420,7 @@ function renderSviTiles(
   }
   // Lazy-load avatars in one batched request across all visible tiles, so
   // we make a single POST instead of 30 separate calls.
-  void hydratePlayerAvatars(sviList, servers);
+  void hydratePlayerAvatars(sviList, servers, placeId, seq);
 }
 
 function buildSviTile(
@@ -489,10 +543,7 @@ function clearFilter(): void {
   const nativeList = document.getElementById('rbx-public-game-server-item-container');
   if (!nativeList) return;
   sortSeq++; // invalidate any in-flight applySort fetch
-  flag(nativeList, null);
-  document.getElementById(SVI_LIST_ID)?.remove();
-  showNativeList(nativeList);
-  document.getElementById(CLEAR_BTN_ID)?.remove();
+  clearSortUi(false);
 }
 
 // ---------- Per-tile decoration ----------
@@ -508,7 +559,7 @@ const BRIDGE_FALLBACK_AFTER_PASSES = 5;
 
 function decorateAllTiles(): void {
   // Scoped to the NATIVE container only — our SviBlox tiles live in
-  // #bp-svi-server-list and already include ping/share built-in. Decorating
+  // #bp-svi-server-list and already include ping built-in. Decorating
   // them would overwrite the correct ping with "—" because they don't have
   // bridge-populated dataset.bpPing.
   const tiles = document.querySelectorAll<HTMLLIElement>(
@@ -546,6 +597,7 @@ function decorateAllTiles(): void {
 async function hydrateTilesFromApi(tiles: NodeListOf<HTMLLIElement>): Promise<void> {
   const placeId = parsePlaceId();
   if (!placeId) return;
+  const seq = sortSeq;
   let servers: ServerInstance[];
   try {
     servers = await fetchServersUpTo(placeId, FETCH_PAGE_LIMIT);
@@ -553,12 +605,14 @@ async function hydrateTilesFromApi(tiles: NodeListOf<HTMLLIElement>): Promise<vo
     console.warn('[SviBlox] fiber-bridge fallback fetch failed', e);
     return;
   }
+  if (sortSeq !== seq || parsePlaceId() !== placeId) return;
   if (!servers.length) return;
   // Fill any tile still missing dataset.bpInstanceId with the matching
   // server by position (the API order matches the displayed order on a
   // freshly-refreshed page).
   for (let i = 0; i < Math.min(tiles.length, servers.length); i++) {
     const tile = tiles[i];
+    if (!tile.isConnected) continue;
     if (tile.dataset.bpInstanceId) continue;
     const s = servers[i];
     tile.dataset.bpInstanceId = s.id;
@@ -567,7 +621,7 @@ async function hydrateTilesFromApi(tiles: NodeListOf<HTMLLIElement>): Promise<vo
     if (typeof s.maxPlayers === 'number') tile.dataset.bpMaxPlayers = String(s.maxPlayers);
   }
   // Re-decorate now that data's populated.
-  for (const tile of tiles) decorateTile(tile, readInstanceFromTile(tile));
+  for (const tile of tiles) if (tile.isConnected) decorateTile(tile, readInstanceFromTile(tile));
 }
 
 function decorateTile(tile: HTMLLIElement, instance?: ServerInstance): void {
@@ -618,7 +672,9 @@ interface ThumbBatchResponse {
 
 async function hydratePlayerAvatars(
   sviList: HTMLElement,
-  servers: ServerInstance[]
+  servers: ServerInstance[],
+  placeId: number,
+  seq: number
 ): Promise<void> {
   // Collect every visible token across all tiles into one batch.
   const VISIBLE = 5;
@@ -633,6 +689,7 @@ async function hydratePlayerAvatars(
     }
   }
   if (!tokenList.length) return;
+  if (isSortStale(seq, placeId, sviList)) return;
 
   // Hit the per-token cache first so repeated sorts on the same servers
   // (and re-visits within 24h) don't refetch what we already have.
@@ -679,6 +736,7 @@ async function hydratePlayerAvatars(
     }
   }
   if (!urls.size) return;
+  if (isSortStale(seq, placeId, sviList)) return;
   for (const slot of sviList.querySelectorAll<HTMLElement>('.bp-svi-avatar[data-bp-token]')) {
     const token = slot.dataset.bpToken;
     if (!token) continue;

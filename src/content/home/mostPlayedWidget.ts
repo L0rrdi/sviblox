@@ -218,14 +218,16 @@ function isHomePage(): boolean {
 function findHeadingRow(): HTMLElement | null {
   const root = document.getElementById('HomeContainer');
   if (!root) return null;
-  for (const h of root.querySelectorAll('h1')) {
-    if (h.textContent?.trim() === 'Home') {
-      const row = h.closest('.container-header');
-      if (row instanceof HTMLElement) return row;
-    }
+  // Primary: any `<h1>` inside #HomeContainer's first .container-header is
+  // the page title row regardless of what it says (Norwegian "Hjem",
+  // Spanish "Inicio", etc. all hit). Falls back to just the first
+  // container-header if the h1 lookup misses, which still places the widget
+  // in the right spot.
+  const containerHeader = root.querySelector('.container-header');
+  if (containerHeader instanceof HTMLElement && containerHeader.querySelector('h1')) {
+    return containerHeader;
   }
-  const first = root.querySelector('.container-header');
-  return first instanceof HTMLElement ? first : null;
+  return containerHeader instanceof HTMLElement ? containerHeader : null;
 }
 
 interface WidgetState {

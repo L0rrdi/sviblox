@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getSettings, setSettings } from '@/storage/settingsStore';
+import { getSettings, onSettingsChanged, setSettings } from '@/storage/settingsStore';
 import { clearAllCustomizations } from '@/storage/customizationStore';
 import { getFolders, onFoldersChanged, FoldersState, FolderGame } from '@/storage/foldersStore';
 import { Settings } from '@/types';
@@ -334,11 +334,29 @@ export function PopupApp() {
     selectedFolderId: null,
   });
   const [activeInfo, setActiveInfo] = useState<string | null>(null);
+  const [openCategories, setOpenCategories] = useState<Set<FeatureCategory>>(
+    () => new Set(['home'])
+  );
 
   useEffect(() => {
-    void getSettings().then(setLocal);
-    void getFolders().then(setFoldersState);
-    onFoldersChanged(setFoldersState);
+    let cancelled = false;
+    void getSettings().then((next) => {
+      if (!cancelled) setLocal(next);
+    });
+    void getFolders().then((next) => {
+      if (!cancelled) setFoldersState(next);
+    });
+    const unsubscribeSettings = onSettingsChanged((next) => {
+      if (!cancelled) setLocal(next);
+    });
+    const unsubscribeFolders = onFoldersChanged((next) => {
+      if (!cancelled) setFoldersState(next);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribeSettings();
+      unsubscribeFolders();
+    };
   }, []);
 
   if (!settings) {
@@ -446,7 +464,7 @@ export function PopupApp() {
         </div>
 
         <div className="sv-category-list">
-          {CATEGORY_ORDER.map((cat, idx) => {
+          {CATEGORY_ORDER.map((cat) => {
             const items = FEATURES.filter((f) => f.category === cat.id);
             if (!items.length) return null;
             const enabledCount = items.filter((f) => settings[f.key]).length;
@@ -454,7 +472,16 @@ export function PopupApp() {
               <details
                 className="sv-category"
                 key={cat.id}
-                open={idx === 0}
+                open={openCategories.has(cat.id)}
+                onToggle={(e) => {
+                  const isOpen = e.currentTarget.open;
+                  setOpenCategories((prev) => {
+                    const next = new Set(prev);
+                    if (isOpen) next.add(cat.id);
+                    else next.delete(cat.id);
+                    return next;
+                  });
+                }}
               >
                 <summary className="sv-category-summary">
                   <span className="sv-category-name">{cat.label}</span>

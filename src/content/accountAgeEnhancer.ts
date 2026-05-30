@@ -21,7 +21,8 @@ const PILL_OVERLAY_CLASS =
   'absolute inset-[0] transition-colors group-hover/interactable:bg-[var(--color-state-hover)] group-active/interactable:bg-[var(--color-state-press)] group-disabled/interactable:bg-none';
 const PILL_LABEL_CLASS = 'padding-y-xsmall text-no-wrap text-truncate-end';
 
-let inflight = false;
+let loadSeq = 0;
+let loadingKey: string | null = null;
 
 export async function run(): Promise<void> {
   const userId = readProfileUserId();
@@ -48,21 +49,31 @@ export async function run(): Promise<void> {
     existing.remove();
   }
 
-  if (inflight) return;
-  inflight = true;
+  const path = location.pathname;
+  const key = `${path}:${userId}`;
+  if (loadingKey === key) return;
+  loadingKey = key;
+  const seq = ++loadSeq;
   try {
     const user = await getRobloxUser(userId);
+    if (isStale(seq, path, userId)) return;
     if (!user?.created) return;
     const label = formatAge(user.created);
     if (!label) return;
     render(userId, label);
   } finally {
-    inflight = false;
+    if (loadingKey === key) loadingKey = null;
   }
 }
 
 function cleanup(): void {
+  loadSeq += 1;
+  loadingKey = null;
   document.getElementById(PILL_ID)?.remove();
+}
+
+function isStale(seq: number, path: string, userId: number): boolean {
+  return seq !== loadSeq || location.pathname !== path || readProfileUserId() !== userId;
 }
 
 function render(userId: number, label: string): void {

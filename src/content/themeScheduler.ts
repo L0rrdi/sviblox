@@ -5,6 +5,7 @@ import { resolveThemeSchedule, sanitizeThemeSchedule } from '@/storage/themeSche
 let initialized = false;
 let timer: number | null = null;
 let applying = false;
+let applyPending = false;
 
 function clearTimer(): void {
   if (timer != null) {
@@ -14,7 +15,10 @@ function clearTimer(): void {
 }
 
 async function applySchedule(): Promise<void> {
-  if (applying) return;
+  if (applying) {
+    applyPending = true;
+    return;
+  }
   applying = true;
   try {
     const [settings, userThemes] = await Promise.all([getSettings(), getUserThemes()]);
@@ -34,6 +38,10 @@ async function applySchedule(): Promise<void> {
     timer = window.setTimeout(() => void applySchedule(), delay);
   } finally {
     applying = false;
+    if (applyPending) {
+      applyPending = false;
+      void applySchedule();
+    }
   }
 }
 

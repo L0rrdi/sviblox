@@ -8,7 +8,7 @@
  * Owned check → POST awarded-dates (existing helper, cached 5m).
  */
 
-import { loadUhblSheet, refreshUhblSheet } from '@/api/uhblSheet';
+import { loadUhblSheet, refreshUhblSheet, syncUhblMediaViaTab } from '@/api/uhblSheet';
 import { getBadgeDetail, getUserBadgeAwardedDates } from '@/api/badges';
 import { getBadgeIcons, getPlaceIcons } from '@/api/thumbnails';
 import { getAuthenticatedUserId } from '@/api/users';
@@ -42,7 +42,6 @@ interface Filters {
   tags: Set<string>;
   difficulty: Set<number>;
   enjoyment: Set<UhblTier>;
-  ownership: 'all' | 'owned' | 'unowned';
 }
 
 interface PageState {
@@ -63,7 +62,7 @@ interface PageState {
 const state: PageState = {
   badges: [],
   fetchedAt: 0,
-  filters: { query: '', tags: new Set(), difficulty: new Set(), enjoyment: new Set(), ownership: 'all' },
+  filters: { query: '', tags: new Set(), difficulty: new Set(), enjoyment: new Set() },
   owned: new Map(),
   ownedLoaded: false,
   signedInUserId: null,
@@ -72,6 +71,18 @@ const state: PageState = {
   gameIcons: new Map(),
   loadId: 0,
 };
+
+const GAME_DETAIL_CONCURRENCY = 2;
+const GAME_DETAIL_DELAY_MS = 250;
+
+let gameHydrationObserver: IntersectionObserver | null = null;
+let gameDetailQueue: Array<{ badge: UhblBadge; page: HTMLElement; loadId: number }> = [];
+const gameDetailQueued = new Set<number>();
+const gameDetailInFlight = new Set<number>();
+const gameDetailDone = new Set<number>();
+let gameDetailWorkers = 0;
+let pendingPlaceIcons = new Map<number, number[]>();
+let placeIconTimer: number | null = null;
 
 function isUhblRoute(): boolean {
   return location.hash.replace(/^#/, '') === 'bloxplus-uhbl';
@@ -127,7 +138,10 @@ function restoreHomeContent(): void {
 export function run(): void {
   ensureStyle();
   const host = findHomeContentHost();
-  if (!host) return;
+  if (!host) {
+    unmountPage();
+    return;
+  }
   void runAsync(host);
 }
 
@@ -135,11 +149,7 @@ async function runAsync(host: HTMLElement): Promise<void> {
   const settings = await getSettings();
   const allowed = settings.showUhbl && isUhblRoute() && isHomePath();
   if (!allowed) {
-    const page = document.getElementById(PAGE_ID);
-    if (page) {
-      page.remove();
-      restoreHomeContent();
-    }
+    unmountPage();
     return;
   }
   hideHomeContent(host);
@@ -161,28 +171,71 @@ async function mountPage(host: HTMLElement): Promise<void> {
   void load(page, loadId, false);
 }
 
+function unmountPage(): void {
+  const page = document.getElementById(PAGE_ID);
+  if (!page) return;
+  state.loadId += 1;
+  resetTransientHydration();
+  clearFixedFilters(page);
+  page.remove();
+  restoreHomeContent();
+}
+
 async function load(page: HTMLElement, loadId: number, forceRefresh: boolean): Promise<void> {
   setStatus(page, forceRefresh ? 'Refreshing sheet...' : 'Loading sheet...');
   try {
     const { badges, fetchedAt, stale } = forceRefresh
       ? { badges: await refreshUhblSheet(), fetchedAt: Date.now(), stale: false }
       : await loadUhblSheet();
-    if (loadId !== state.loadId) return;
-    state.badges = badges;
-    state.fetchedAt = fetchedAt;
-    renderRows(page);
-    updateMeta(page);
+    if (loadId !== state.loadId || !page.isConnected) return;
+    renderLoadedSheet(page, loadId, badges, fetchedAt);
     setStatus(page, stale ? 'Showing cached list. Checking for updates...' : '');
+    if (stale) void refreshStaleSheet(page, loadId);
 
     // Owned check — independent, errors swallowed.
-    void resolveOwnership(page, loadId);
+    // Ownership is started by renderLoadedSheet().
 
     // Per-badge enrichment — fire and forget. Updates row DOM in place.
-    void hydrateBadgeIcons(page, loadId);
-    void hydrateGameLinksAndIcons(page, loadId);
+    // Row enrichment is started by renderLoadedSheet().
   } catch (e) {
-    if (loadId !== state.loadId) return;
+    if (loadId !== state.loadId || !page.isConnected) return;
     setStatus(page, `Could not load sheet: ${(e as Error).message}`);
+  }
+}
+
+function renderLoadedSheet(
+  page: HTMLElement,
+  loadId: number,
+  badges: UhblBadge[],
+  fetchedAt: number
+): void {
+  if (loadId !== state.loadId || !page.isConnected) return;
+  resetTransientHydration();
+  state.badges = badges;
+  state.fetchedAt = fetchedAt;
+  renderRows(page);
+  updateMeta(page);
+  updateFixedFilters();
+
+  // Owned check is independent and best-effort.
+  void resolveOwnership(page, loadId);
+
+  // Per-badge enrichment updates row DOM in place.
+  void hydrateBadgeIcons(page, loadId);
+  hydrateGameLinksAndIcons(page, loadId);
+}
+
+async function refreshStaleSheet(page: HTMLElement, loadId: number): Promise<void> {
+  try {
+    const badges = await refreshUhblSheet();
+    if (loadId !== state.loadId || !page.isConnected) return;
+    const nextLoadId = ++state.loadId;
+    renderLoadedSheet(page, nextLoadId, badges, Date.now());
+    setStatus(page, 'Updated from the source sheet just now.');
+  } catch {
+    if (loadId === state.loadId && page.isConnected) {
+      setStatus(page, 'Showing cached list. Source refresh failed.');
+    }
   }
 }
 
@@ -193,7 +246,8 @@ async function resolveOwnership(page: HTMLElement, loadId: number): Promise<void
     state.signedInUserId = userId;
     if (!userId) {
       state.ownedLoaded = true;
-      renderRows(page);
+      updateOwnedIndicators(page);
+      updateMeta(page);
       return;
     }
     const badgeIds = state.badges.map((b) => b.badgeId);
@@ -208,7 +262,8 @@ async function resolveOwnership(page: HTMLElement, loadId: number): Promise<void
     // Owned check is best-effort.
     if (loadId === state.loadId) {
       state.ownedLoaded = true;
-      renderRows(page);
+      updateOwnedIndicators(page);
+      updateMeta(page);
     }
   }
 }
@@ -227,48 +282,161 @@ async function hydrateBadgeIcons(page: HTMLElement, loadId: number): Promise<voi
   }
 }
 
-async function hydrateGameLinksAndIcons(page: HTMLElement, loadId: number): Promise<void> {
-  // Resolve badge → rootPlaceId in small concurrent batches. getBadgeDetail
-  // caches 5 minutes; we live with one refresh per session.
-  await mapLimit(state.badges, 8, async (b) => {
-    if (loadId !== state.loadId) return;
-    if (state.rootPlaceIds.has(b.badgeId)) return;
-    const detail = await getBadgeDetail(b.badgeId);
+function hydrateGameLinksAndIcons(page: HTMLElement, loadId: number): void {
+  // Game links + thumbnails hydrate lazily as rows approach the viewport
+  // (see installLazyGameHydration → enqueueGameDetail → flushPlaceIcons),
+  // which avoids a badge-detail 429 burst on first paint.
+  installLazyGameHydration(page, loadId);
+}
+
+function installLazyGameHydration(page: HTMLElement, loadId: number): void {
+  gameHydrationObserver?.disconnect();
+  gameHydrationObserver = null;
+
+  const byId = new Map(state.badges.map((b) => [b.badgeId, b]));
+  const rows = [...page.querySelectorAll<HTMLElement>('.bp-uhbl-row')];
+  const enqueueRow = (row: HTMLElement): void => {
+    const badgeId = Number(row.dataset.badgeId);
+    const badge = byId.get(badgeId);
+    if (badge) enqueueGameDetail(badge, page, loadId);
+  };
+
+  if (!('IntersectionObserver' in window)) {
+    rows.slice(0, 30).forEach(enqueueRow);
+    return;
+  }
+
+  gameHydrationObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const row = entry.target as HTMLElement;
+      gameHydrationObserver?.unobserve(row);
+      enqueueRow(row);
+    }
+  }, { root: null, rootMargin: '700px 0px', threshold: 0 });
+
+  for (const row of rows) gameHydrationObserver.observe(row);
+}
+
+function enqueueGameDetail(badge: UhblBadge, page: HTMLElement, loadId: number): void {
+  if (loadId !== state.loadId) return;
+  if (
+    state.rootPlaceIds.has(badge.badgeId) ||
+    gameDetailDone.has(badge.badgeId) ||
+    gameDetailQueued.has(badge.badgeId) ||
+    gameDetailInFlight.has(badge.badgeId)
+  ) {
+    return;
+  }
+  gameDetailQueued.add(badge.badgeId);
+  gameDetailQueue.push({ badge, page, loadId });
+  pumpGameDetailQueue();
+}
+
+function pumpGameDetailQueue(): void {
+  while (gameDetailWorkers < GAME_DETAIL_CONCURRENCY && gameDetailQueue.length) {
+    const item = gameDetailQueue.shift()!;
+    gameDetailQueued.delete(item.badge.badgeId);
+    gameDetailWorkers += 1;
+    void (async () => {
+      try {
+        await hydrateOneGameDetail(item.badge, item.page, item.loadId);
+        await sleep(GAME_DETAIL_DELAY_MS);
+      } finally {
+        gameDetailWorkers -= 1;
+        pumpGameDetailQueue();
+      }
+    })();
+  }
+}
+
+async function hydrateOneGameDetail(
+  badge: UhblBadge,
+  page: HTMLElement,
+  loadId: number
+): Promise<void> {
+  if (loadId !== state.loadId) return;
+  if (gameDetailInFlight.has(badge.badgeId) || gameDetailDone.has(badge.badgeId)) return;
+  gameDetailInFlight.add(badge.badgeId);
+  try {
+    const detail = await getBadgeDetail(badge.badgeId);
     if (loadId !== state.loadId) return;
     const placeId = detail?.awardingUniverse?.rootPlaceId;
     const gameName = detail?.awardingUniverse?.name;
+    const row = page.querySelector<HTMLElement>(`[data-badge-id="${badge.badgeId}"]`);
     if (placeId) {
-      state.rootPlaceIds.set(b.badgeId, placeId);
-      const row = page.querySelector<HTMLElement>(`[data-badge-id="${b.badgeId}"]`);
-      if (row) {
-        const a = row.querySelector<HTMLAnchorElement>('a.bp-game-link');
-        if (a) {
-          a.href = `/games/${placeId}`;
-          a.removeAttribute('aria-disabled');
-        }
+      state.rootPlaceIds.set(badge.badgeId, placeId);
+      const a = row?.querySelector<HTMLAnchorElement>('a.bp-game-link');
+      if (a) {
+        a.href = `/games/${placeId}`;
+        a.removeAttribute('aria-disabled');
       }
+      queuePlaceIconHydration(page, loadId, badge.badgeId, placeId);
     }
     if (gameName) {
-      const row = page.querySelector<HTMLElement>(`[data-badge-id="${b.badgeId}"]`);
       const live = row?.querySelector<HTMLElement>('.bp-live-game-name');
       // Only override the sheet's gameName if the sheet's text was generic.
       if (live && live.textContent !== gameName) live.title = `Live: ${gameName}`;
     }
-  });
+  } finally {
+    gameDetailInFlight.delete(badge.badgeId);
+    gameDetailDone.add(badge.badgeId);
+  }
+}
 
-  if (loadId !== state.loadId) return;
-  const placeIds = [...state.rootPlaceIds.values()];
+function queuePlaceIconHydration(
+  page: HTMLElement,
+  loadId: number,
+  badgeId: number,
+  placeId: number
+): void {
+  const existing = pendingPlaceIcons.get(placeId) ?? [];
+  existing.push(badgeId);
+  pendingPlaceIcons.set(placeId, existing);
+  if (placeIconTimer !== null) return;
+  placeIconTimer = window.setTimeout(() => {
+    placeIconTimer = null;
+    void flushPlaceIcons(page, loadId);
+  }, 700);
+}
+
+async function flushPlaceIcons(page: HTMLElement, loadId: number): Promise<void> {
+  const pending = pendingPlaceIcons;
+  pendingPlaceIcons = new Map();
+  const placeIds = [...pending.keys()];
+  if (!placeIds.length) return;
   const placeIcons = await getPlaceIcons(placeIds);
   if (loadId !== state.loadId) return;
-  for (const [badgeId, placeId] of state.rootPlaceIds) {
+  for (const [placeId, badgeIds] of pending) {
     const url = placeIcons.get(placeId);
     if (!url) continue;
-    state.gameIcons.set(badgeId, url);
-    const img = page.querySelector<HTMLImageElement>(
-      `[data-badge-id="${badgeId}"] img.bp-game-icon`
-    );
-    if (img && !img.src) img.src = url;
+    for (const badgeId of badgeIds) {
+      state.gameIcons.set(badgeId, url);
+      const img = page.querySelector<HTMLImageElement>(
+        `[data-badge-id="${badgeId}"] img.bp-game-icon`
+      );
+      if (img && !img.src) img.src = url;
+    }
   }
+}
+
+function resetTransientHydration(): void {
+  gameHydrationObserver?.disconnect();
+  gameHydrationObserver = null;
+  gameDetailQueue = [];
+  gameDetailQueued.clear();
+  gameDetailInFlight.clear();
+  gameDetailDone.clear();
+  pendingPlaceIcons = new Map();
+  if (placeIconTimer !== null) {
+    window.clearTimeout(placeIconTimer);
+    placeIconTimer = null;
+  }
+  state.badgeIcons.clear();
+  state.rootPlaceIds.clear();
+  state.gameIcons.clear();
+  state.owned.clear();
+  state.ownedLoaded = false;
 }
 
 function updateOwnedIndicators(page: HTMLElement): void {
@@ -297,11 +465,6 @@ function updateOwnedIndicators(page: HTMLElement): void {
     }
     counter.textContent = `${owned} / ${total} owned`;
     counter.style.display = '';
-  }
-  // Owned filter visibility too.
-  const filterBar = page.querySelector<HTMLElement>('.bp-uhbl-owned-filter');
-  if (filterBar) {
-    filterBar.style.display = state.signedInUserId ? '' : 'none';
   }
 }
 
@@ -359,10 +522,12 @@ function renderSkeleton(page: HTMLElement): void {
       <div class="bp-uhbl-meta-row">
         <span data-uhbl-meta>Loading...</span>
         <button class="bp-uhbl-btn" data-action="refresh">Refresh</button>
+        <button class="bp-uhbl-btn" data-action="sync-videos" title="Open the source sheet in a hidden tab and scrape video URLs that aren't in the bootstrap window. Adds higher-tier videos. ~15s.">Sync videos</button>
         <a class="bp-uhbl-btn bp-uhbl-btn-ghost" href="https://docs.google.com/spreadsheets/d/17HE0xTN5tuq8BAkwvtP17tlJW8rpFNI3WzbI4LYXchk/htmlview" target="_blank" rel="noopener">Open source sheet</a>
       </div>
       <div class="bp-uhbl-progress" data-uhbl-progress style="display:none"></div>
     </header>
+    <div class="bp-uhbl-filter-spacer" aria-hidden="true"></div>
     <div class="bp-uhbl-filters">
       <input type="search" class="bp-uhbl-search" placeholder="Search game or badge name..." data-filter="query" />
       <div class="bp-uhbl-pillsets">
@@ -379,12 +544,6 @@ function renderSkeleton(page: HTMLElement): void {
           <div class="bp-uhbl-pills" data-pillset="tags"></div>
         </details>
       </div>
-      <div class="bp-uhbl-owned-filter" style="display:none">
-        <span class="bp-uhbl-filter-label">Show:</span>
-        <label><input type="radio" name="uhbl-owned" value="all" checked> All</label>
-        <label><input type="radio" name="uhbl-owned" value="owned"> Owned</label>
-        <label><input type="radio" name="uhbl-owned" value="unowned"> Unowned</label>
-      </div>
       <div class="bp-uhbl-status" data-uhbl-status></div>
     </div>
     <div class="bp-uhbl-groups" data-uhbl-groups></div>
@@ -394,29 +553,55 @@ function renderSkeleton(page: HTMLElement): void {
   page.querySelector('[data-action="refresh"]')?.addEventListener('click', () => {
     const loadId = ++state.loadId;
     // Drop session enrichment so refresh reflects deletions / additions cleanly.
-    state.badgeIcons.clear();
-    state.rootPlaceIds.clear();
-    state.gameIcons.clear();
-    state.owned.clear();
-    state.ownedLoaded = false;
+    resetTransientHydration();
     void load(page, loadId, true);
   });
+
+  const syncBtn = page.querySelector<HTMLButtonElement>('[data-action="sync-videos"]');
+  syncBtn?.addEventListener('click', () => {
+    void runSyncVideos(page, syncBtn);
+  });
+}
+
+async function runSyncVideos(page: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+  const originalText = btn.textContent ?? 'Sync videos';
+  btn.disabled = true;
+  btn.textContent = 'Opening sheet…';
+  setStatus(page, 'Syncing video links — opening the source sheet in a hidden tab. This takes about 15 seconds.');
+  try {
+    const result = await syncUhblMediaViaTab();
+    const added = result.after - result.before;
+    btn.textContent = added > 0 ? `Synced (+${added})` : 'Synced (no new)';
+    setStatus(
+      page,
+      added > 0
+        ? `Found ${added} new video link${added === 1 ? '' : 's'} (${result.after} total). Reloading…`
+        : `No new video links found beyond the ${result.after} already saved.`
+    );
+    if (added > 0) {
+      // Re-pull the snapshot so the new mediaMap entries get attached and rendered.
+      const loadId = ++state.loadId;
+      resetTransientHydration();
+      void load(page, loadId, true);
+    }
+  } catch (err) {
+    btn.textContent = 'Sync failed';
+    setStatus(page, `Sync failed: ${(err as Error).message}`);
+  } finally {
+    window.setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }, 4000);
+  }
 }
 
 function bindFilterControls(page: HTMLElement): void {
   const search = page.querySelector<HTMLInputElement>('[data-filter="query"]');
+  if (search) search.value = state.filters.query;
   search?.addEventListener('input', () => {
     state.filters.query = search.value.trim().toLowerCase();
     applyFilters(page);
   });
-  for (const radio of page.querySelectorAll<HTMLInputElement>('input[name="uhbl-owned"]')) {
-    radio.addEventListener('change', () => {
-      if (radio.checked) {
-        state.filters.ownership = radio.value as Filters['ownership'];
-        applyFilters(page);
-      }
-    });
-  }
 }
 
 function renderRows(page: HTMLElement): void {
@@ -432,7 +617,7 @@ function renderRows(page: HTMLElement): void {
 
   const orderedTiers = [...byDifficulty.entries()]
     .filter(([, rows]) => rows.length > 0)
-    .sort((a, b) => a[0] - b[0]); // 1 (½★, easiest) → 8 (7★, hardest)
+    .sort((a, b) => a[0] - b[0]); // parser d=2 (½★, easiest) → d=8 (6★, hardest)
 
   groups.innerHTML = orderedTiers
     .map(([d, rows]) => renderDifficultyGroup(d, rows))
@@ -502,7 +687,8 @@ function buildDifficultyPills(page: HTMLElement, difficulties: number[]): void {
   host.innerHTML = difficulties
     .map((d) => {
       const label = formatDifficultyLabel(d);
-      return `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-difficulty" data-difficulty="${d}" title="Difficulty ${label}">${renderStars(d)}</button>`;
+      const active = state.filters.difficulty.has(d) ? ' bp-uhbl-pill-active' : '';
+      return `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-difficulty${active}" data-difficulty="${d}" title="Difficulty ${label}">${renderStars(d)}</button>`;
     })
     .join('');
   for (const btn of host.querySelectorAll<HTMLButtonElement>('.bp-uhbl-pill')) {
@@ -526,7 +712,7 @@ function buildEnjoymentPills(page: HTMLElement, tiers: UhblTier[]): void {
   host.innerHTML = tiers
     .map(
       (t) =>
-        `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-er bp-uhbl-er-${cssTier(t)}" data-enjoyment="${escapeAttr(t)}">${escapeHtml(t)}</button>`
+        `<button type="button" class="bp-uhbl-pill bp-uhbl-pill-er bp-uhbl-er-${cssTier(t)}${state.filters.enjoyment.has(t) ? ' bp-uhbl-pill-active' : ''}" data-enjoyment="${escapeAttr(t)}">${escapeHtml(t)}</button>`
     )
     .join('');
   for (const btn of host.querySelectorAll<HTMLButtonElement>('.bp-uhbl-pill')) {
@@ -597,7 +783,7 @@ function buildPillSet(page: HTMLElement, key: 'tags', values: string[]): void {
   host.innerHTML = values
     .map(
       (v) =>
-        `<button type="button" class="bp-uhbl-pill" data-${key}="${escapeAttr(v.toLowerCase())}">${escapeHtml(v)}</button>`
+        `<button type="button" class="bp-uhbl-pill${state.filters.tags.has(v.toLowerCase()) ? ' bp-uhbl-pill-active' : ''}" data-${key}="${escapeAttr(v.toLowerCase())}">${escapeHtml(v)}</button>`
     )
     .join('');
   for (const btn of host.querySelectorAll<HTMLButtonElement>('.bp-uhbl-pill')) {
@@ -625,8 +811,6 @@ function applyFilters(page: HTMLElement): void {
     for (const row of tier.querySelectorAll<HTMLElement>('.bp-uhbl-row')) {
       const search = row.dataset.search ?? '';
       const tags = (row.dataset.tags ?? '').split('|').filter(Boolean);
-      const ownedState = row.dataset.ownedState ?? 'unknown';
-
       const difficulty = Number(row.dataset.difficulty);
       const enjoyment = (row.dataset.enjoyment ?? 'N/A') as UhblTier;
 
@@ -637,10 +821,6 @@ function applyFilters(page: HTMLElement): void {
       }
       if (visible && f.difficulty.size && !f.difficulty.has(difficulty)) visible = false;
       if (visible && f.enjoyment.size && !f.enjoyment.has(enjoyment)) visible = false;
-      if (visible && f.ownership !== 'all' && state.signedInUserId) {
-        if (f.ownership === 'owned' && ownedState !== 'owned') visible = false;
-        if (f.ownership === 'unowned' && ownedState !== 'unowned') visible = false;
-      }
 
       row.style.display = visible ? '' : 'none';
       if (visible) visibleInTier += 1;
@@ -663,17 +843,7 @@ function applyFilters(page: HTMLElement): void {
   } else if (visibleTotal && empty) {
     empty.remove();
   }
-}
-
-async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let index = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (index < items.length) {
-      const item = items[index++];
-      await fn(item);
-    }
-  });
-  await Promise.all(workers);
+  updateFixedFilters();
 }
 
 function formatRelative(ts: number): string {
@@ -685,6 +855,61 @@ function formatRelative(ts: number): string {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   return `${d}d ago`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function stickyTopOffset(): number {
+  let bottom = 0;
+  for (const selector of ['.rbx-header', '.navbar-fixed-top', '#header']) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > 0) bottom = Math.max(bottom, rect.bottom);
+  }
+  return Math.round(bottom + 8);
+}
+
+function updateFixedFilters(): void {
+  const page = document.getElementById(PAGE_ID);
+  if (!(page instanceof HTMLElement)) return;
+  const filters = page.querySelector<HTMLElement>('.bp-uhbl-filters');
+  const spacer = page.querySelector<HTMLElement>('.bp-uhbl-filter-spacer');
+  if (!filters || !spacer) return;
+
+  const top = stickyTopOffset();
+  const pageRect = page.getBoundingClientRect();
+  const filtersHeight = filters.offsetHeight;
+  const shouldFix = pageRect.top <= top && pageRect.bottom > top + filtersHeight + 24;
+
+  if (!shouldFix) {
+    clearFixedFilters(page);
+    return;
+  }
+
+  spacer.style.display = 'block';
+  spacer.style.height = `${filtersHeight + 18}px`;
+  filters.style.setProperty('--bp-uhbl-fixed-left', `${pageRect.left}px`);
+  filters.style.setProperty('--bp-uhbl-fixed-width', `${pageRect.width}px`);
+  filters.style.setProperty('--bp-uhbl-fixed-top', `${top}px`);
+  filters.classList.add('bp-uhbl-filters-fixed');
+}
+
+function clearFixedFilters(page: HTMLElement): void {
+  const filters = page.querySelector<HTMLElement>('.bp-uhbl-filters');
+  const spacer = page.querySelector<HTMLElement>('.bp-uhbl-filter-spacer');
+  filters?.classList.remove('bp-uhbl-filters-fixed');
+  filters?.style.removeProperty('--bp-uhbl-fixed-left');
+  filters?.style.removeProperty('--bp-uhbl-fixed-width');
+  filters?.style.removeProperty('--bp-uhbl-fixed-top');
+  if (spacer) {
+    spacer.style.display = 'none';
+    spacer.style.height = '0';
+  }
 }
 
 function ensureStyle(): void {
@@ -760,6 +985,21 @@ function ensureStyle(): void {
       position: sticky; top: 8px; z-index: 5;
       backdrop-filter: blur(8px);
     }
+    #${PAGE_ID} .bp-uhbl-filter-spacer {
+      display: none;
+      height: 0;
+    }
+    #${PAGE_ID} .bp-uhbl-filters.bp-uhbl-filters-fixed {
+      position: fixed;
+      left: var(--bp-uhbl-fixed-left);
+      top: var(--bp-uhbl-fixed-top);
+      width: var(--bp-uhbl-fixed-width);
+      max-height: calc(100vh - var(--bp-uhbl-fixed-top) - 8px);
+      overflow: auto;
+      box-sizing: border-box;
+      z-index: 1000;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.24);
+    }
     #${PAGE_ID} .bp-uhbl-search {
       width: 100%; max-width: 420px;
       padding: 8px 10px; font-size: 13px;
@@ -790,13 +1030,6 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-uhbl-pill.bp-uhbl-pill-active {
       background: #4a90e2; border-color: #4a90e2; color: #fff;
     }
-    #${PAGE_ID} .bp-uhbl-owned-filter {
-      display: flex; align-items: center; gap: 12px; font-size: 12px;
-    }
-    #${PAGE_ID} .bp-uhbl-owned-filter label {
-      display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
-    }
-    #${PAGE_ID} .bp-uhbl-filter-label { opacity: 0.7; }
     #${PAGE_ID} .bp-uhbl-status {
       font-size: 12px; opacity: 0.65; min-height: 14px;
     }
@@ -874,7 +1107,7 @@ function ensureStyle(): void {
 
     #${PAGE_ID} .bp-uhbl-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr));
       gap: 12px; margin-top: 12px;
     }
     #${PAGE_ID} .bp-uhbl-row {
@@ -982,6 +1215,8 @@ export function install(): void {
   initialized = true;
   window.addEventListener('hashchange', () => run());
   window.addEventListener('popstate', () => run());
+  window.addEventListener('scroll', () => updateFixedFilters(), { passive: true });
+  window.addEventListener('resize', () => updateFixedFilters());
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (!isUhblRoute()) return;

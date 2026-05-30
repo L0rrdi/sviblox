@@ -28,13 +28,18 @@ interface FavoritesResponse {
  * cursor= query param. v1 returns 404. CORS is allowed for www.roblox.com
  * origin so this works straight from a content script.
  */
-export async function getFavoriteGames(userId: number, limit = 100): Promise<FavoriteGame[]> {
+export async function getFavoriteGames(
+  userId: number,
+  limit = 100,
+  opts: { retries?: number } = {}
+): Promise<FavoriteGame[]> {
   const url =
     `https://games.roblox.com/v2/users/${userId}/favorite/games` +
     `?cursor=&limit=${Math.min(limit, 100)}&sortOrder=Desc`;
   const data = await robloxFetch<FavoritesResponse>(url, {
     cacheKey: `favorites:${userId}`,
     cacheTtlMs: 5 * 60_000,
+    retries: opts.retries,
   });
   return data.data ?? [];
 }

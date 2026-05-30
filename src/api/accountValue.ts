@@ -362,8 +362,10 @@ interface FetchUrlResponse<T> {
 async function getAvatarItemPrices(assetIds: number[]): Promise<Map<number, number>> {
   const out = new Map<number, number>();
   if (!assetIds.length) return out;
-  // De-dupe in case the inventory pager returned a copy.
-  const unique = [...new Set(assetIds)];
+  // De-dupe, then sort so the per-batch cache key is stable regardless of the
+  // order the inventory pager returned items in (the cache key is the joined
+  // id list — unsorted, it would miss whenever Roblox jitters return order).
+  const unique = [...new Set(assetIds)].sort((a, b) => a - b);
   // Catalog endpoint accepts up to 120 items per call.
   for (let i = 0; i < unique.length; i += 120) {
     const batch = unique.slice(i, i + 120);

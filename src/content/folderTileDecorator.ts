@@ -45,7 +45,7 @@ function decorateNativeTiles(): void {
   // href query, and uses `.featured-game-icon-container` instead of
   // `.game-card-thumb-container`.
   const tiles = document.querySelectorAll<HTMLElement>(
-    `.game-card.game-tile:not([${DECORATED_ATTR}]), .featured-game-container.game-card-container:not([${DECORATED_ATTR}])`
+    `.game-card.game-tile, .featured-game-container.game-card-container`
   );
   for (const tile of tiles) {
     // SviBlox tiles already have the button baked into their HTML — flag
@@ -56,18 +56,30 @@ function decorateNativeTiles(): void {
       continue;
     }
     const link = tile.querySelector<HTMLAnchorElement>('a.game-card-link');
-    if (!link) continue;
+    if (!link) {
+      tile.querySelector('.bp-tile-add-folder-injected')?.remove();
+      tile.removeAttribute(DECORATED_ATTR);
+      continue;
+    }
     let universeId = Number(link.id);
     if (!Number.isFinite(universeId) || universeId <= 0) {
       const m = (link.href || '').match(/[?&]universeId=(\d+)/);
       universeId = m ? Number(m[1]) : NaN;
     }
-    if (!Number.isFinite(universeId) || universeId <= 0) continue;
+    if (!Number.isFinite(universeId) || universeId <= 0) {
+      tile.querySelector('.bp-tile-add-folder-injected')?.remove();
+      tile.removeAttribute(DECORATED_ATTR);
+      continue;
+    }
 
     const thumb =
       tile.querySelector<HTMLElement>('.game-card-thumb-container') ??
       tile.querySelector<HTMLElement>('.featured-game-icon-container');
-    if (!thumb) continue;
+    if (!thumb) {
+      tile.querySelector('.bp-tile-add-folder-injected')?.remove();
+      tile.removeAttribute(DECORATED_ATTR);
+      continue;
+    }
 
     const placeIdMatch = (link.href || '').match(/\/games\/(\d+)/);
     const placeId = placeIdMatch ? placeIdMatch[1] : '';
@@ -76,19 +88,25 @@ function decorateNativeTiles(): void {
 
     if (getComputedStyle(thumb).position === 'static') thumb.style.position = 'relative';
 
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className =
-      'bp-tile-add-folder bp-tile-add-folder-injected' +
-      (foldedUniverseIds.has(universeId) ? ' bp-in-folder' : '');
+    let btn = tile.querySelector<HTMLButtonElement>('.bp-tile-add-folder-injected');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'bp-tile-add-folder bp-tile-add-folder-injected';
+      btn.setAttribute('aria-label', 'Add to folder');
+      btn.title = 'Add to folder';
+      btn.innerHTML = ICON_HTML;
+    }
     btn.dataset.bpAddFolder = String(universeId);
     btn.dataset.bpAddFolderName = name;
-    if (placeId) btn.dataset.bpAddFolderPlace = placeId;
-    btn.setAttribute('aria-label', 'Add to folder');
-    btn.title = 'Add to folder';
-    btn.innerHTML = ICON_HTML;
-    thumb.appendChild(btn);
-    tile.setAttribute(DECORATED_ATTR, '1');
+    if (placeId) {
+      btn.dataset.bpAddFolderPlace = placeId;
+    } else {
+      delete btn.dataset.bpAddFolderPlace;
+    }
+    btn.classList.toggle('bp-in-folder', foldedUniverseIds.has(universeId));
+    if (btn.parentElement !== thumb) thumb.appendChild(btn);
+    tile.setAttribute(DECORATED_ATTR, String(universeId));
   }
 }
 

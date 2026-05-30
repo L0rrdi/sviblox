@@ -15,8 +15,10 @@ import {
   updateCurrentHomeListSection,
 } from './favoritesSection';
 
+// One-shot per page load. Mirrors favoritesSection — any failure that
+// completes the first call also counts, since the MutationObserver would
+// otherwise retry on every tick.
 let myGamesLoaded = false;
-let myGamesDisabled = false;
 let myGamesSnapshot: HomeListSnapshot | null = null;
 
 export function ensureMyGamesSection(): HTMLElement {
@@ -47,10 +49,6 @@ export function ensureMyGamesSection(): HTMLElement {
 }
 
 async function loadMyGames(section: HTMLElement): Promise<void> {
-  if (myGamesDisabled) {
-    if (myGamesSnapshot) applyHomeListSnapshot(section, myGamesSnapshot);
-    return;
-  }
   const rowEl = section.querySelector('.bp-fav-row') as HTMLElement;
   const metaEl = section.querySelector('.bp-fav-meta') as HTMLElement;
 
@@ -79,7 +77,6 @@ async function loadMyGames(section: HTMLElement): Promise<void> {
       seeAllHref,
     };
     updateCurrentHomeListSection(MY_GAMES_SECTION_ID, myGamesSnapshot, section);
-    if (/HTTP\s\d/.test(msg)) myGamesDisabled = true;
     return;
   }
 

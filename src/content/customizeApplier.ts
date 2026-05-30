@@ -23,6 +23,7 @@ import { tagAll } from './customizeIdentity';
 
 // Prime the in-memory cache once so synchronous reads work on every tick.
 let primed = false;
+let runSeq = 0;
 function prime(): void {
   if (primed) return;
   primed = true;
@@ -230,7 +231,9 @@ export function run(): void {
 }
 
 async function runAsync(): Promise<void> {
+  const seq = ++runSeq;
   const settings = await getSettings();
+  if (seq !== runSeq) return;
   if (!settings.showCustomize) {
     // Master switch off — drop everything we've touched.
     restoreAll();
@@ -524,10 +527,10 @@ function restoreAll(): void {
     delete lbl.dataset.bpCustOrigText;
   }
   for (const img of document.querySelectorAll('img.bp-cust-icon')) img.remove();
+  for (const svg of document.querySelectorAll('svg.bp-animated-nav-icon')) svg.remove();
   for (const native of document.querySelectorAll<HTMLElement>('[data-bp-cust-hidden-icon]')) {
     native.style.display = '';
     delete native.dataset.bpCustHiddenIcon;
   }
   for (const li of document.querySelectorAll<HTMLElement>('[data-bp-custom-button-id]')) li.remove();
 }
-

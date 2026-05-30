@@ -41,7 +41,7 @@ export async function run(): Promise<void> {
 
   const ul = document.querySelector<HTMLUListElement>('.favorite-follow-vote-share');
   if (!ul) return;
-  const existing = document.getElementById(BUTTON_ID);
+  const existing = document.getElementById(BUTTON_ID) as HTMLLIElement | null;
   if (existing) {
     // Defensive reorder: if the folder button raced in front of us on the
     // first dispatch tick, slide us back left of it on the next tick.
@@ -53,6 +53,11 @@ export async function run(): Promise<void> {
     ) {
       ul.insertBefore(existing, folderLi);
     }
+    if (existing.dataset.bpPlaceId !== String(placeId)) {
+      existing.dataset.bpPlaceId = String(placeId);
+      const btn = existing.querySelector<HTMLButtonElement>('.bp-playtime-btn');
+      if (btn) void hydrate(btn, placeId);
+    }
     return;
   }
 
@@ -61,6 +66,7 @@ export async function run(): Promise<void> {
   const li = document.createElement('li');
   li.id = BUTTON_ID;
   li.className = 'bp-playtime-btn-li';
+  li.dataset.bpPlaceId = String(placeId);
   li.innerHTML = `
     <button type="button" class="bp-playtime-btn" aria-label="Lifetime playtime">
       <span class="bp-playtime-btn-icon" aria-hidden="true">
@@ -98,8 +104,13 @@ export async function run(): Promise<void> {
 
 async function hydrate(btn: HTMLButtonElement, placeId: number): Promise<void> {
   const universeId = await resolveUniverseId(placeId);
+  const li = btn.closest<HTMLLIElement>(`#${BUTTON_ID}`);
+  if (!li?.isConnected || li.dataset.bpPlaceId !== String(placeId) || readPlaceId() !== placeId) {
+    return;
+  }
   if (!universeId) return;
   const entries = await getPlaytime();
+  if (li.dataset.bpPlaceId !== String(placeId) || readPlaceId() !== placeId) return;
   const entry = entries.find((e) => e.universeId === universeId);
   applyButtonState(btn, entry);
 }

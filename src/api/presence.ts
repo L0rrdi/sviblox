@@ -1,6 +1,7 @@
 import { cacheGet, cacheSet } from '@/storage/cacheStore';
 
 const CACHE_TTL_MS = 60_000;
+const PRESENCE_BATCH_SIZE = 50;
 
 export type PresenceType = 0 | 1 | 2 | 3 | 4;
 // 0 Offline, 1 Online (website), 2 InGame, 3 InStudio, 4 Invisible.
@@ -16,10 +17,6 @@ export interface UserPresence {
 
 interface PresenceResponse {
   userPresences?: UserPresence[];
-}
-
-interface LastOnlineResponse {
-  lastOnlineTimestamps?: Array<{ userId: number; lastOnline: string }>;
 }
 
 interface FetchUrlResponse<T> {
@@ -44,39 +41,23 @@ export async function getUserPresence(userIds: number[]): Promise<Map<number, Us
     for (const p of cached.userPresences ?? []) out.set(p.userId, p);
     return out;
   }
-  const resp = (await chrome.runtime.sendMessage({
-    type: 'fetchUrl',
-    url: 'https://presence.roblox.com/v1/presence/users',
-    body: JSON.stringify({ userIds }),
-  })) as FetchUrlResponse<PresenceResponse> | undefined;
-  if (!resp?.ok || !resp.data) return out;
-  await cacheSet(cacheKey, resp.data, CACHE_TTL_MS);
-  for (const p of resp.data.userPresences ?? []) out.set(p.userId, p);
+  const rows: UserPresence[] = [];
+  for (const batch of chunks(userIds, PRESENCE_BATCH_SIZE)) {
+    const resp = (await chrome.runtime.sendMessage({
+      type: 'fetchUrl',
+      url: 'https://presence.roblox.com/v1/presence/users',
+      body: JSON.stringify({ userIds: batch }),
+    })) as FetchUrlResponse<PresenceResponse> | undefined;
+    if (!resp?.ok || !resp.data) continue;
+    rows.push(...(resp.data.userPresences ?? []));
+  }
+  await cacheSet(cacheKey, { userPresences: rows }, CACHE_TTL_MS);
+  for (const p of rows) out.set(p.userId, p);
   return out;
 }
 
-/**
- * Server-side last-online timestamp per user (ISO 8601 string). This is the
- * dedicated `/v1/presence/last-online` endpoint — only reachable via the
- * SW proxy because page-context CORS rejects it.
- */
-export async function getLastOnline(userIds: number[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>();
-  if (!userIds.length) return out;
-  const cacheKey = `lastOnline:${[...userIds].sort().join(',')}`;
-  const cached = await cacheGet<LastOnlineResponse>(cacheKey);
-  if (cached) {
-    for (const t of cached.lastOnlineTimestamps ?? []) out.set(t.userId, t.lastOnline);
-    return out;
-  }
-  const resp = (await chrome.runtime.sendMessage({
-    type: 'fetchUrl',
-    url: 'https://presence.roblox.com/v1/presence/last-online',
-    body: JSON.stringify({ userIds }),
-  })) as FetchUrlResponse<LastOnlineResponse> | undefined;
-  console.log('[SviBlox][last-online] SW resp:', resp);
-  if (!resp?.ok || !resp.data) return out;
-  await cacheSet(cacheKey, resp.data, CACHE_TTL_MS);
-  for (const t of resp.data.lastOnlineTimestamps ?? []) out.set(t.userId, t.lastOnline);
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }

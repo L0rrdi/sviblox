@@ -42,7 +42,7 @@ export function parseRoProJson(raw: string, legacyUnit: RoProUnit = 'minutes'): 
   if (timePlayed) return parseTimePlayedMap(timePlayed, legacyUnit, warnings);
 
   if (Array.isArray(parsed) && looksLikeSviBloxEntries(parsed)) {
-    const entries = parsed as GamePlaytimeEntry[];
+    const entries = (parsed as GamePlaytimeEntry[]).map(normalizeImportedEntry).filter(Boolean) as GamePlaytimeEntry[];
     warnings.push('Imported an existing SviBlox playtime JSON export.');
     return { entries, totalSeconds: sum(entries), warnings };
   }
@@ -198,6 +198,10 @@ function parseTimePlayedMap(
       continue;
     }
     const seconds = Math.round(t.time * factor);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      warnings.push(`Skipped key "${id}" - non-positive playtime.`);
+      continue;
+    }
     entries.push({
       universeId,
       totalSeconds: seconds,
@@ -247,6 +251,20 @@ function looksLikeSviBloxEntries(v: unknown[]): boolean {
       typeof entry.importedSeconds === 'number' &&
       typeof entry.trackedSeconds === 'number'
   );
+}
+
+function normalizeImportedEntry(entry: GamePlaytimeEntry): GamePlaytimeEntry | null {
+  const importedSeconds = Math.max(0, Math.round(Number(entry.importedSeconds) || 0));
+  const trackedSeconds = Math.max(0, Math.round(Number(entry.trackedSeconds) || 0));
+  const totalSeconds = Math.max(0, Math.round(Number(entry.totalSeconds) || importedSeconds + trackedSeconds));
+  if (totalSeconds <= 0) return null;
+  return {
+    ...entry,
+    importedSeconds,
+    trackedSeconds,
+    totalSeconds,
+    sources: Array.isArray(entry.sources) ? entry.sources : [],
+  };
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

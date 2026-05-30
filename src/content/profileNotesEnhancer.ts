@@ -39,7 +39,8 @@ const CARD_ANCHOR_SELS = [
 
 let mountedForUser: number | null = null;
 let mountedForPath: string | null = null;
-let inflight = false;
+let loadSeq = 0;
+let loadingKey: string | null = null;
 let subscribed = false;
 
 export async function run(): Promise<void> {
@@ -60,15 +61,20 @@ export async function run(): Promise<void> {
     reattachIfMissing(userId);
     return;
   }
-  if (inflight) return;
-  inflight = true;
 
+  const path = location.pathname;
+  const key = `${path}:${userId}`;
+  if (loadingKey === key) return;
+  cleanup();
+  loadingKey = key;
+  const seq = ++loadSeq;
   try {
-    cleanup();
     const me = await getAuthenticatedUserId();
+    if (isStale(seq, path, userId)) return;
     if (me && me === userId) return; // Skip own profile entirely.
 
     await ensureAnnotationsPrimed();
+    if (isStale(seq, path, userId)) return;
     ensureStyle();
     if (!subscribed) {
       subscribed = true;
@@ -81,17 +87,23 @@ export async function run(): Promise<void> {
     renderCard(userId);
     renderNicknameChip(userId);
     mountedForUser = userId;
-    mountedForPath = location.pathname;
+    mountedForPath = path;
   } finally {
-    inflight = false;
+    if (loadingKey === key) loadingKey = null;
   }
 }
 
 function cleanup(): void {
+  loadSeq += 1;
+  loadingKey = null;
   document.getElementById(CARD_ID)?.remove();
   document.getElementById(CHIP_ID)?.remove();
   mountedForUser = null;
   mountedForPath = null;
+}
+
+function isStale(seq: number, path: string, userId: number): boolean {
+  return seq !== loadSeq || location.pathname !== path || readProfileUserId() !== userId;
 }
 
 function reattachIfMissing(userId: number): void {

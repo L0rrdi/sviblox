@@ -7,7 +7,7 @@
 import { getAuthenticatedUserId } from '@/api/users';
 import { getMyFriends } from '@/api/friends';
 import { getUserPresence, UserPresence } from '@/api/presence';
-import { getLastSeenForUser, recordLastSeen, LastSeenRow } from '@/storage/lastSeenStore';
+import { getLastSeenForUser, LastSeenRow } from '@/storage/lastSeenStore';
 import { escapeHtml } from '@/util/html';
 
 const CHIP_ID = 'bloxplus-friend-last-online';
@@ -16,7 +16,8 @@ const USERNAME_SEL = '.stylistic-alts-username';
 
 let renderedForUser: number | null = null;
 let renderedForPath: string | null = null;
-let inflight = false;
+let loadingKey: string | null = null;
+let loadSeq = 0;
 
 export async function run(): Promise<void> {
   const userId = readProfileUserId();
@@ -29,11 +30,15 @@ export async function run(): Promise<void> {
     reattachIfMissing();
     return;
   }
-  if (inflight) return;
-  inflight = true;
+  const path = location.pathname;
+  const key = `${path}:${userId}`;
+  if (loadingKey === key) return;
+  loadingKey = key;
+  const seq = ++loadSeq;
   try {
     cleanup();
     const me = await getAuthenticatedUserId();
+    if (isStale(seq, path, userId)) return;
     if (!me || me === userId) return; // Don't decorate own profile.
     let friends;
     try {
@@ -41,25 +46,39 @@ export async function run(): Promise<void> {
     } catch {
       return;
     }
+    if (isStale(seq, path, userId)) return;
     const isFriend = friends.some((f) => f.id === userId);
     if (!isFriend) return;
     const presenceMap = await getUserPresence([userId]);
+    if (isStale(seq, path, userId)) return;
     const presence = presenceMap.get(userId);
     // If they're currently online/in-game/in-studio, capture that as a
     // fresh last-seen sample so the chip stays accurate after they go
     // offline — even without waiting for the SW alarm cycle.
     if (presence && presence.userPresenceType >= 1 && presence.userPresenceType <= 3) {
-      await recordLastSeen({
-        [userId]: { ts: new Date().toISOString(), location: presence.lastLocation },
-      });
+      await recordLastSeenViaWorker(userId, presence.lastLocation);
     }
     const lastSeen = await getLastSeenForUser(userId);
+    if (isStale(seq, path, userId)) return;
     ensureStyle();
     render(userId, presence, lastSeen);
     renderedForUser = userId;
-    renderedForPath = location.pathname;
+    renderedForPath = path;
   } finally {
-    inflight = false;
+    if (loadingKey === key) loadingKey = null;
+  }
+}
+
+async function recordLastSeenViaWorker(userId: number, locationText?: string): Promise<void> {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'bp-record-last-seen',
+      userId,
+      ts: new Date().toISOString(),
+      location: locationText,
+    });
+  } catch {
+    // Best-effort freshness hint. The periodic service-worker snapshot remains authoritative.
   }
 }
 
@@ -77,6 +96,10 @@ function cleanup(): void {
   document.getElementById(CHIP_ID)?.remove();
   renderedForUser = null;
   renderedForPath = null;
+}
+
+function isStale(seq: number, path: string, userId: number): boolean {
+  return seq !== loadSeq || location.pathname !== path || readProfileUserId() !== userId;
 }
 
 function render(userId: number, presence: UserPresence | undefined, lastSeen: LastSeenRow | null): void {
