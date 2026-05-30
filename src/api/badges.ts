@@ -22,7 +22,7 @@ export async function getBadgeDetail(badgeId: number): Promise<BadgeFullDetail |
   try {
     return await robloxFetch<BadgeFullDetail>(
       `https://badges.roblox.com/v1/badges/${badgeId}`,
-      { cacheKey: `badgeDetail:${badgeId}`, cacheTtlMs: 5 * 60_000, retries: 1 }
+      { cacheKey: `badgeDetail:${badgeId}`, cacheTtlMs: 5 * 60_000, retries: 3 }
     );
   } catch {
     return null;

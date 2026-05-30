@@ -122,6 +122,64 @@ interface ServerInstanceLike {
     window.location.href = `https://www.roblox.com/games/start?placeId=${detail.placeId}`;
   });
 
+  // Bridge for SviBlox dev-product Buy buttons. The purchase APIs
+  // (`RobloxItemPurchase.startDeveloperProductPurchaseFlow` and the legacy
+  // `Roblox.GamePassItemPurchase.openPurchaseVerificationView`) live on page
+  // globals and are invisible from the isolated content-script world — same
+  // reason React fiber expandos are. We dispatch from the isolated world
+  // with just a productId and let main world find the button, harvest its
+  // data-* attrs, and invoke whichever purchase API exists.
+  document.addEventListener('bp-dev-product-purchase', (e: Event) => {
+    const detail = (e as CustomEvent<{ productId?: number }>).detail;
+    if (!detail || typeof detail.productId !== 'number') return;
+    const button = document.querySelector<HTMLButtonElement>(
+      `.bp-dev-product-purchase[data-product-id="${detail.productId}"]`
+    );
+    if (!button) return;
+
+    const w = window as unknown as {
+      RobloxItemPurchase?: {
+        startDeveloperProductPurchaseFlow?: (opts: unknown) => void;
+      };
+      Roblox?: {
+        GamePassItemPurchase?: {
+          openPurchaseVerificationView?: (btn: unknown, itemType: string) => void;
+        };
+      };
+      jQuery?: (el: HTMLElement) => unknown;
+      $?: (el: HTMLElement) => unknown;
+    };
+
+    const unified = w.RobloxItemPurchase?.startDeveloperProductPurchaseFlow;
+    if (typeof unified === 'function') {
+      try {
+        unified({
+          productId: Number(button.dataset.productId || 0),
+          developerProductId: Number(button.dataset.itemId || 0),
+          assetName: button.dataset.itemName || '',
+          expectedPrice: Number(button.dataset.expectedPrice || 0),
+          expectedSellerId: Number(button.dataset.expectedSellerId || 0),
+          sellerName: button.dataset.sellerName || '',
+          imageUrl: button.dataset.imageUrl || '',
+        });
+        return;
+      } catch {
+        /* fall through to legacy */
+      }
+    }
+
+    const legacy = w.Roblox?.GamePassItemPurchase?.openPurchaseVerificationView;
+    const jq = w.jQuery ?? w.$;
+    if (typeof legacy === 'function' && typeof jq === 'function') {
+      try {
+        legacy(jq(button), 'developer-product');
+        return;
+      } catch {
+        /* swallow */
+      }
+    }
+  });
+
   // Bridge for SviBlox custom-tile Join buttons. Roblox's own join URL
   // (`/games/start?placeId=X&gameInstanceId=Y`) drops the instance id in
   // some flows and routes the user to a random server. The launcher API,

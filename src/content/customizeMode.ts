@@ -761,14 +761,11 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   drawer.querySelector('[data-action="icon-clear"]')?.addEventListener('click', () => {
     if (!selectedId) return;
     iconColorToolsForId = null;
-    if (selectedId.startsWith('leftnav::custom-button-')) {
-      void updateCustomButton(selectedId.replace('leftnav::custom-button-', ''), {
-        iconDataUrl: undefined,
-        originalIconDataUrl: undefined,
-        iconPreset: undefined,
-      });
-    }
-    void writeEdit({ iconDataUrl: undefined, originalIconDataUrl: undefined, iconPreset: undefined });
+    // Route through commitSelectedIcon so a custom button's icon clears on its
+    // CustomButton record only. Writing the undefined fields to entries[] as
+    // well (the old code) created an orphan entry that inflated the counter and
+    // surfaced as a phantom "(missing)" row after the button was deleted.
+    void commitSelectedIcon({ iconDataUrl: undefined, originalIconDataUrl: undefined, iconPreset: undefined });
   });
   drawer.querySelector('[data-action="icon-revert-tint"]')?.addEventListener('click', () => {
     void revertSelectedIconTint();
@@ -789,11 +786,13 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   const urlInput = drawer.querySelector<HTMLInputElement>('[data-field="iconUrl"]');
   urlInput?.addEventListener('change', () => {
     const v = urlInput.value.trim();
+    const iconUrl = v ? normalizeIconUrl(v) ?? undefined : undefined;
+    if (v && !iconUrl) return;
     // Paste also seeds the original so a future tint is revertable. Empty
     // string clears both (icon-clear button does the same explicitly).
     void commitSelectedIcon({
-      iconDataUrl: v || undefined,
-      originalIconDataUrl: v || undefined,
+      iconDataUrl: iconUrl,
+      originalIconDataUrl: iconUrl,
       iconPreset: undefined,
     });
   });
@@ -834,20 +833,23 @@ async function handleAddCustomButton(drawer: HTMLElement): Promise<void> {
     renderDrawer();
     return;
   }
+  let normalizedIconUrl: string | undefined;
   if (iconUrl && !pendingCustomIconDataUrl) {
     // Reject "Image URL" entries that aren't valid http(s) (already a URL
     // input but users sometimes paste data: URLs or partial paths). Allow
     // pendingCustomIconDataUrl through unchecked — it's a canvas-produced
     // data URL, vetted by us.
-    if (!iconUrl.startsWith('data:image/') && !normalizeCustomUrl(iconUrl)) {
+    const normalized = normalizeIconUrl(iconUrl);
+    if (!normalized) {
       addFormError = `Image URL "${iconUrl}" isn't valid.`;
       addFormOpen = true;
       renderDrawer();
       return;
     }
+    normalizedIconUrl = normalized;
   }
 
-  const explicitIcon = pendingCustomIconDataUrl || iconUrl || undefined;
+  const explicitIcon = pendingCustomIconDataUrl || normalizedIconUrl || undefined;
   const button = await addCustomButton({
     label,
     url,
@@ -890,36 +892,48 @@ function normalizeCustomUrl(raw: string): string | null {
   }
 }
 
+function normalizeIconUrl(raw: string): string | null {
+  if (!raw) return null;
+  if (raw.startsWith('data:image/')) return raw;
+  return normalizeCustomUrl(raw);
+}
+
 async function writeEdit(patch: Partial<ElementEdit>): Promise<void> {
-  if (!selectedId) return;
+  const id = selectedId;
+  if (!id) return;
+  await writeEditForId(id, patch);
+}
+
+async function writeEditForId(id: string, patch: Partial<ElementEdit>): Promise<void> {
   const spec = await getCustomizations();
-  const current = spec.entries[selectedId] ?? {};
+  const current = spec.entries[id] ?? {};
   const next: ElementEdit = { ...current, ...patch };
-  const el = resolveById(selectedId, current.fallbackSelector);
+  const el = resolveById(id, current.fallbackSelector);
   if (el && !next.fallbackSelector) next.fallbackSelector = buildFallbackSelector(el);
-  await setEntry(selectedId, next);
+  await setEntry(id, next);
 }
 
 async function updateSelectedIconPreset(iconPreset: string): Promise<void> {
-  if (!selectedId) return;
-  if (selectedId.startsWith('leftnav::custom-button-')) {
-    const id = selectedId.replace('leftnav::custom-button-', '');
-    await updateCustomButton(id, { iconPreset: iconPreset || undefined, iconDataUrl: undefined });
-    await writeEdit({ iconDataUrl: undefined, iconPreset: undefined });
-  } else {
-    await writeEdit({ iconPreset: iconPreset || undefined, iconDataUrl: undefined });
-  }
+  const targetId = selectedId;
+  if (!targetId) return;
+  // commitIconForId puts the preset on the CustomButton record for custom
+  // buttons and in entries[] for everything else. Writing to entries[] for a
+  // custom button (the old second call here) left an orphan icon-only entry.
+  await commitIconForId(targetId, { iconPreset: iconPreset || undefined, iconDataUrl: undefined });
   iconColorToolsForId = null;
   renderDrawer();
 }
 
 async function handleIconUpload(file: File): Promise<void> {
+  const targetId = selectedId;
+  if (!targetId) return;
   try {
     const dataUrl = await resizeImageToDataUrl(file, 32);
-    iconColorToolsForId = selectedId;
+    if (selectedId !== targetId) return;
+    iconColorToolsForId = targetId;
     // Stash the upload as both iconDataUrl and originalIconDataUrl so a
     // future tint can be reverted without losing the original image.
-    await commitSelectedIcon({
+    await commitIconForId(targetId, {
       iconDataUrl: dataUrl,
       originalIconDataUrl: dataUrl,
       iconPreset: undefined,
@@ -942,12 +956,24 @@ async function commitSelectedIcon(patch: {
   originalIconDataUrl?: string;
   iconPreset?: string;
 }): Promise<void> {
-  if (!selectedId) return;
-  if (selectedId.startsWith('leftnav::custom-button-')) {
-    const id = selectedId.replace('leftnav::custom-button-', '');
+  const targetId = selectedId;
+  if (!targetId) return;
+  await commitIconForId(targetId, patch);
+}
+
+async function commitIconForId(
+  targetId: string,
+  patch: {
+    iconDataUrl?: string;
+    originalIconDataUrl?: string;
+    iconPreset?: string;
+  }
+): Promise<void> {
+  if (targetId.startsWith('leftnav::custom-button-')) {
+    const id = targetId.replace('leftnav::custom-button-', '');
     await updateCustomButton(id, patch);
   } else {
-    await writeEdit(patch);
+    await writeEditForId(targetId, patch);
   }
 }
 
@@ -976,6 +1002,8 @@ function selectedIconHasTint(): boolean {
 }
 
 async function tintSelectedIcon(color: string): Promise<void> {
+  const targetId = selectedId;
+  if (!targetId) return;
   const original = getSelectedOriginalIconUrl();
   const current = getSelectedIconUrl();
   // Always tint from the ORIGINAL (not the already-tinted current) — otherwise
@@ -991,8 +1019,9 @@ async function tintSelectedIcon(color: string): Promise<void> {
     const patch: { iconDataUrl: string; originalIconDataUrl?: string; iconPreset: undefined } =
       { iconDataUrl: dataUrl, iconPreset: undefined };
     if (!original && current) patch.originalIconDataUrl = current;
-    await commitSelectedIcon(patch);
-    iconColorToolsForId = selectedId;
+    if (selectedId !== targetId) return;
+    await commitIconForId(targetId, patch);
+    iconColorToolsForId = targetId;
     renderDrawer();
   } catch (e) {
     console.warn('[SviBlox] Customize icon color failed', e);

@@ -18,9 +18,9 @@ export function mergePlaytime(
       map.set(k, { ...e });
       continue;
     }
-    const sources = Array.from(new Set([...cur.sources, ...e.sources]));
-    const importedSeconds = Math.max(cur.importedSeconds, e.importedSeconds);
-    const trackedSeconds = Math.max(cur.trackedSeconds, e.trackedSeconds);
+    const sources = Array.from(new Set([...(cur.sources ?? []), ...(e.sources ?? [])]));
+    const importedSeconds = Math.max(cur.importedSeconds ?? 0, e.importedSeconds ?? 0);
+    const trackedSeconds = Math.max(cur.trackedSeconds ?? 0, e.trackedSeconds ?? 0);
     const windowSeconds = { ...(cur.windowSeconds ?? {}), ...(e.windowSeconds ?? {}) };
     map.set(k, {
       ...cur,

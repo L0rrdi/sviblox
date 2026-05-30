@@ -7,7 +7,7 @@
  * Listener is installed once on first dispatch. Settings changes update the
  * in-memory key→destination map live via `chrome.storage.onChanged`.
  *
- * Holding `?` (no input focus, no modifiers) shows a help overlay listing
+ * Holding `|` (no input focus, no modifiers) shows a help overlay listing
  * the active bindings. It hides on the next `keyup`, so it's a hold rather
  * than a toggle.
  */
@@ -60,9 +60,10 @@ function invert(map: Record<string, string>): Map<string, string> {
   const out = new Map<string, string>();
   for (const [destId, key] of Object.entries(map)) {
     if (typeof key !== 'string' || key.length !== 1) continue;
-    if (RESERVED_HOTKEY_KEYS.has(key)) continue;
+    const normalized = key.toLowerCase();
+    if (RESERVED_HOTKEY_KEYS.has(normalized)) continue;
     if (!isKnownHotkeyDestinationId(destId)) continue;
-    out.set(key, destId);
+    out.set(normalized, destId);
   }
   return out;
 }

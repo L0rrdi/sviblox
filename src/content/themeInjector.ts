@@ -3517,6 +3517,7 @@ function clearFriendsBarTimer(): void {
 
 let classicObserver: MutationObserver | null = null;
 let classicDebounce: number | null = null;
+let applySeq = 0;
 
 function scheduleClassicTweaks(): void {
   if (classicDebounce !== null) return;
@@ -3568,7 +3569,9 @@ function deactivateClassic2016Tweaks(): void {
 }
 
 async function applyCurrent(): Promise<void> {
+  const seq = ++applySeq;
   const [settings, custom] = await Promise.all([getSettings(), getCustomTheme()]);
+  if (seq !== applySeq) return;
   let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
   if (!style) {
     style = document.createElement('style');

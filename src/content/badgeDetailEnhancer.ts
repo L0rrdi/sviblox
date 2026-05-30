@@ -8,6 +8,7 @@ import { getBadgeDetail } from '@/api/badges';
 const ROW_ID = 'bloxplus-badge-awarded-row';
 
 let renderedFor: number | null = null;
+let loadSeq = 0;
 
 export async function run(): Promise<void> {
   const badgeId = parseBadgeId();
@@ -17,21 +18,23 @@ export async function run(): Promise<void> {
   }
   if (renderedFor === badgeId && document.getElementById(ROW_ID)) return;
 
-  const descRow = await waitFor<HTMLElement>(
-    () => findFieldRow('Description') as HTMLElement | null
-  );
-  if (!descRow) return;
+  const seq = ++loadSeq;
+  const path = location.pathname;
+  const anchorRow = await waitFor<HTMLElement>(findInsertionRow);
+  if (!anchorRow || isStale(seq, path, badgeId)) return;
 
   const detail = await getBadgeDetail(badgeId);
-  const count = detail?.statistics?.awardedCount ?? 0;
+  if (isStale(seq, path, badgeId) || !detail?.statistics) return;
+  const count = detail.statistics.awardedCount;
 
-  insertAwardedRow(descRow, count);
+  insertAwardedRow(anchorRow, count);
   renderedFor = badgeId;
 }
 
 function cleanup(): void {
   document.getElementById(ROW_ID)?.remove();
   renderedFor = null;
+  loadSeq += 1;
 }
 
 function parseBadgeId(): number | null {
@@ -41,16 +44,17 @@ function parseBadgeId(): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function findFieldRow(label: string): Element | null {
-  const rows = document.querySelectorAll('.item-field-container');
-  for (const r of rows) {
-    const lab = r.querySelector('.field-label');
-    if (lab?.textContent?.trim() === label) return r;
-  }
-  return null;
+function findInsertionRow(): HTMLElement | null {
+  const rows = [...document.querySelectorAll<HTMLElement>('.item-field-container')]
+    .filter((row) => row.id !== ROW_ID);
+  return rows.at(-1) ?? null;
 }
 
-function insertAwardedRow(descRow: HTMLElement, count: number): void {
+function isStale(seq: number, path: string, badgeId: number): boolean {
+  return seq !== loadSeq || location.pathname !== path || parseBadgeId() !== badgeId;
+}
+
+function insertAwardedRow(anchorRow: HTMLElement, count: number): void {
   document.getElementById(ROW_ID)?.remove();
   const row = document.createElement('div');
   row.id = ROW_ID;
@@ -63,7 +67,7 @@ function insertAwardedRow(descRow: HTMLElement, count: number): void {
   value.textContent = count.toLocaleString();
   row.appendChild(label);
   row.appendChild(value);
-  descRow.insertAdjacentElement('afterend', row);
+  anchorRow.insertAdjacentElement('afterend', row);
 }
 
 async function waitFor<T extends Element>(

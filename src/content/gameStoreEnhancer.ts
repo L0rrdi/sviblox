@@ -7,9 +7,17 @@ import { escapeHtml } from '@/util/html';
 const STYLE_ID = 'bloxplus-dev-products-style';
 const SECTION_ID = 'bloxplus-dev-products-section';
 
+interface RenderedProducts {
+  products: DeveloperProduct[];
+  icons: Map<number, string>;
+  seller: SellerInfo;
+  empty: boolean;
+}
+
 let renderedFor: number | null = null;
 let inFlight = false;
 const failedUniverses = new Map<number, string>();
+const productsCache = new Map<number, RenderedProducts>();
 
 export async function run(): Promise<void> {
   const placeId = parsePlaceIdFromUrl();
@@ -27,10 +35,14 @@ export async function run(): Promise<void> {
   ensureStyle();
 
   const passesSection = findPassesSection();
-  if (!passesSection) {
-    cleanup();
-    return;
-  }
+  // The Store tab being inactive (or React mid-rebuild) makes the passes
+  // section vanish briefly. Don't tear down our section in that case —
+  // tearing down would refetch + flash "Loading..." every time the user
+  // tabs between Store / Servers / About on a single game page. Just
+  // leave the section in DOM; it'll come back into view when the store
+  // tab is active again. cleanup() runs only when the user actually
+  // leaves the game page (no placeId in URL) or disables the setting.
+  if (!passesSection) return;
 
   const universeId = readUniverseIdFromPage() ?? (await placeIdToUniverseId(placeId));
   if (!universeId) return;
@@ -38,6 +50,22 @@ export async function run(): Promise<void> {
   const priorError = failedUniverses.get(universeId);
   if (priorError) {
     renderError(ensureSection(passesSection), priorError);
+    renderedFor = universeId;
+    return;
+  }
+
+  // Cache hit: re-render synchronously without refetching or flashing
+  // "Loading...". Catches the case where Roblox re-rendered the store
+  // panel and wiped our section between dispatch ticks.
+  const cached = productsCache.get(universeId);
+  if (cached) {
+    if (cached.empty) {
+      document.getElementById(SECTION_ID)?.remove();
+      renderedFor = universeId;
+      return;
+    }
+    if (renderedFor === universeId && document.getElementById(SECTION_ID)) return;
+    renderProducts(ensureSection(passesSection), cached.products, cached.icons, cached.seller);
     renderedFor = universeId;
     return;
   }
@@ -51,7 +79,9 @@ export async function run(): Promise<void> {
 
   try {
     const products = await getDeveloperProducts(universeId);
+    const seller = readSellerInfoFromPage();
     if (!products.length) {
+      productsCache.set(universeId, { products: [], icons: new Map(), seller, empty: true });
       section.remove();
       renderedFor = universeId;
       return;
@@ -59,7 +89,8 @@ export async function run(): Promise<void> {
 
     const iconIds = products.map((product) => product.id);
     const icons = await getDeveloperProductIcons(iconIds);
-    renderProducts(section, products, icons, readSellerInfoFromPage());
+    productsCache.set(universeId, { products, icons, seller, empty: false });
+    renderProducts(section, products, icons, seller);
     renderedFor = universeId;
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
@@ -205,7 +236,6 @@ function productCard(
             >
               <span>${canTryPurchase ? 'Buy' : 'Unavailable'}</span>
             </button>
-            <div class="bp-dev-product-message" aria-live="polite"></div>
           </div>
         </div>
       </div>
@@ -238,68 +268,15 @@ function handlePurchaseClick(event: MouseEvent): void {
   event.preventDefault();
 
   const productId = Number(button.dataset.productId || button.dataset.itemId);
-  const developerProductId = Number(button.dataset.itemId || button.dataset.productId);
-  const expectedPrice = Number(button.dataset.expectedPrice || 0);
-  const expectedSellerId = Number(button.dataset.expectedSellerId || 0);
+  if (!Number.isFinite(productId) || productId <= 0) return;
 
-  const purchaseOptions = {
-    productId,
-    developerProductId,
-    assetName: button.dataset.itemName || '',
-    expectedPrice,
-    expectedSellerId,
-    sellerName: button.dataset.sellerName || '',
-    imageUrl: button.dataset.imageUrl || '',
-  };
-
-  if (tryUnifiedDeveloperProductPurchase(purchaseOptions)) return;
-  if (tryLegacyDeveloperProductPurchase(button)) return;
-
-  showPurchaseMessage(button, 'Roblox did not expose the web purchase prompt on this page.');
-}
-
-interface PurchaseOptions {
-  productId: number;
-  developerProductId: number;
-  assetName: string;
-  expectedPrice: number;
-  expectedSellerId: number;
-  sellerName: string;
-  imageUrl: string;
-}
-
-function tryUnifiedDeveloperProductPurchase(options: PurchaseOptions): boolean {
-  const api = (
-    window as Window & {
-      RobloxItemPurchase?: Record<string, unknown>;
-    }
-  ).RobloxItemPurchase;
-  const flow = api?.startDeveloperProductPurchaseFlow;
-  if (typeof flow !== 'function') return false;
-  flow(options);
-  return true;
-}
-
-function tryLegacyDeveloperProductPurchase(button: HTMLButtonElement): boolean {
-  const w = window as Window & {
-    Roblox?: {
-      GamePassItemPurchase?: {
-        openPurchaseVerificationView?: (button: unknown, itemType: string) => void;
-      };
-    };
-    jQuery?: (element: HTMLElement) => unknown;
-    $?: (element: HTMLElement) => unknown;
-  };
-  const purchase = w.Roblox?.GamePassItemPurchase?.openPurchaseVerificationView;
-  const jq = w.jQuery ?? w.$;
-  if (typeof purchase !== 'function' || typeof jq !== 'function') return false;
-  purchase(jq(button), 'developer-product');
-  return true;
-}
-
-function showPurchaseMessage(button: HTMLButtonElement, message: string): void {
-  const target = button.parentElement?.querySelector('.bp-dev-product-message');
-  if (target instanceof HTMLElement) target.textContent = message;
+  // Page-world globals (RobloxItemPurchase, Roblox.GamePassItemPurchase,
+  // jQuery) are invisible from this isolated content script — same reason
+  // React fiber expandos are. Dispatch to the main-world bridge in
+  // fiberBridgeMain.ts, which invokes whichever purchase API is available.
+  document.dispatchEvent(
+    new CustomEvent('bp-dev-product-purchase', { detail: { productId } })
+  );
 }
 
 function ensureStyle(): void {
@@ -363,13 +340,6 @@ function ensureStyle(): void {
       border-radius: 10px;
       border: 2px solid currentColor;
       opacity: 0.35;
-    }
-    #${SECTION_ID} .bp-dev-product-message {
-      margin-top: 6px;
-      font-size: 11px;
-      line-height: 1.25;
-      opacity: 0.75;
-      min-height: 0;
     }
     #${SECTION_ID} .bp-dev-products-empty {
       padding: 10px 0;

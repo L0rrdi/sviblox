@@ -18,6 +18,7 @@ let renderedForPath: string | null = null;
 let loadedForUser: number | null = null;
 let loadedForPath: string | null = null;
 let inflightForUser: number | null = null;
+let loadSeq = 0;
 
 export async function run(): Promise<void> {
   const userId = readProfileUserId();
@@ -46,39 +47,56 @@ export async function run(): Promise<void> {
 }
 
 async function loadValue(root: HTMLElement, userId: number): Promise<void> {
-  if (loadedForUser === userId && loadedForPath === location.pathname) {
+  const path = location.pathname;
+  if (loadedForUser === userId && loadedForPath === path) {
     setExpanded(root, true);
     return;
   }
   if (inflightForUser === userId) return;
   inflightForUser = userId;
+  const seq = ++loadSeq;
 
   renderLoading(root, userId);
 
   try {
     const me = await getAuthenticatedUserId();
+    if (isStale(seq, path, userId, root)) return;
     const isOwnProfile = me === userId;
     const [collectibles, purchases, avatarItems] = await Promise.all([
       getCollectiblesValue(userId),
       isOwnProfile ? getOwnPurchaseValue(userId) : Promise.resolve(null),
       getAvatarItemsValue(userId),
     ]);
+    if (isStale(seq, path, userId, root)) return;
     renderValue(root, userId, collectibles, purchases, avatarItems, isOwnProfile);
     loadedForUser = userId;
-    loadedForPath = location.pathname;
+    loadedForPath = path;
   } catch (e) {
+    if (isStale(seq, path, userId, root)) return;
     renderError(root, userId, (e as Error)?.message ?? 'Could not load account value.');
   } finally {
-    inflightForUser = null;
+    if (inflightForUser === userId) inflightForUser = null;
   }
 }
 
 function cleanup(): void {
+  loadSeq += 1;
   document.getElementById(ROOT_ID)?.remove();
   renderedForUser = null;
   renderedForPath = null;
   loadedForUser = null;
   loadedForPath = null;
+  inflightForUser = null;
+}
+
+function isStale(seq: number, path: string, userId: number, root: HTMLElement): boolean {
+  return (
+    seq !== loadSeq ||
+    location.pathname !== path ||
+    readProfileUserId() !== userId ||
+    !root.isConnected ||
+    root.dataset.bpUserId !== String(userId)
+  );
 }
 
 function reattachIfMissing(root: HTMLElement): void {

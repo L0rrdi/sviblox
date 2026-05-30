@@ -57,6 +57,8 @@ interface FetchUrlResponse<T> {
   error?: string;
 }
 
+const COMBINED_NAMES_BATCH_SIZE = 100;
+
 /**
  * apis.roblox.com user-profile-api — POST that needs the CSRF dance, so
  * routed through the SW. Used as a fallback when the v1 user endpoint
@@ -67,12 +69,18 @@ export async function getCombinedNames(
 ): Promise<Map<number, CombinedNamesEntry>> {
   const out = new Map<number, CombinedNamesEntry>();
   if (!userIds.length) return out;
-  const cacheKey = `combinedNames:${[...userIds].sort().join(',')}`;
-  const cached = await cacheGet<CombinedNamesResponse>(cacheKey);
-  if (cached) {
-    for (const p of cached.profileDetails ?? []) out.set(p.userId, p);
-    return out;
+  const uniqueIds = Array.from(new Set(userIds.filter((id) => Number.isFinite(id) && id > 0)));
+  for (const batch of chunks(uniqueIds, COMBINED_NAMES_BATCH_SIZE)) {
+    const response = await getCombinedNamesBatch(batch);
+    for (const p of response.profileDetails ?? []) out.set(p.userId, p);
   }
+  return out;
+}
+
+async function getCombinedNamesBatch(userIds: number[]): Promise<CombinedNamesResponse> {
+  const cacheKey = `combinedNames:${[...userIds].sort((a, b) => a - b).join(',')}`;
+  const cached = await cacheGet<CombinedNamesResponse>(cacheKey);
+  if (cached) return cached;
   const resp = (await chrome.runtime.sendMessage({
     type: 'fetchUrl',
     url: 'https://apis.roblox.com/user-profile-api/v1/user/profiles/get-profiles',
@@ -81,8 +89,13 @@ export async function getCombinedNames(
       fields: ['names.combinedName', 'isVerified', 'names.username'],
     }),
   })) as FetchUrlResponse<CombinedNamesResponse> | undefined;
-  if (!resp?.ok || !resp.data) return out;
+  if (!resp?.ok || !resp.data) return {};
   await cacheSet(cacheKey, resp.data, 5 * 60_000);
-  for (const p of resp.data.profileDetails ?? []) out.set(p.userId, p);
+  return resp.data;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }

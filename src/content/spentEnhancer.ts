@@ -57,17 +57,29 @@ export async function run(): Promise<void> {
   }
   renderText(line, 'Total spent: loading...');
 
+  // Transactions paginate up to 30 pages. If the user switches games during
+  // the fetch, we must not write the previous universe's totals onto the new
+  // game's line — re-check at write time.
+  const requestedUniverseId = universeId;
+
   try {
     const transactions = await getUserGamePurchases(userId);
-    const { totalRobux, count } = sumPurchasesForUniverse(transactions, universeId);
-    renderTotal(line, totalRobux, count, settings);
-    renderedFor = universeId;
+    const currentUniverseId = readUniverseIdFromPage();
+    if (currentUniverseId && currentUniverseId !== requestedUniverseId) return;
+    const writeLine = ensureLine();
+    if (!writeLine) return;
+    const { totalRobux, count } = sumPurchasesForUniverse(transactions, requestedUniverseId);
+    renderTotal(writeLine, totalRobux, count, settings);
+    renderedFor = requestedUniverseId;
   } catch (e) {
+    const currentUniverseId = readUniverseIdFromPage();
+    if (currentUniverseId && currentUniverseId !== requestedUniverseId) return;
     const msg = (e as Error)?.message ?? String(e);
     const message = `failed (${msg})`;
-    failedUniverses.set(universeId, message);
-    renderText(line, `Total spent: ${message}`);
-    renderedFor = universeId;
+    failedUniverses.set(requestedUniverseId, message);
+    const writeLine = ensureLine();
+    if (writeLine) renderText(writeLine, `Total spent: ${message}`);
+    renderedFor = requestedUniverseId;
   } finally {
     inFlight = false;
   }

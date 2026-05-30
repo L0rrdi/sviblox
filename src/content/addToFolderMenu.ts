@@ -21,10 +21,13 @@ export interface OpenMenuOpts {
 
 let outsideHandlerAttached = false;
 let escapeHandlerAttached = false;
+let openSeq = 0;
 
 export async function openFolderMenu(opts: OpenMenuOpts): Promise<void> {
   closeMenu();
+  const seq = ++openSeq;
   const state = await getFolders();
+  if (seq !== openSeq) return;
   const menu = document.createElement('div');
   menu.id = MENU_ID;
   menu.className = 'bp-folder-menu';

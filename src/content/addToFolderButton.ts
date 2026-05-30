@@ -28,13 +28,18 @@ export async function run(): Promise<void> {
 
   const ul = document.querySelector<HTMLUListElement>('.favorite-follow-vote-share');
   if (!ul) return;
-  if (document.getElementById(BUTTON_ID)) return;
+  const existing = document.getElementById(BUTTON_ID) as HTMLLIElement | null;
+  if (existing) {
+    if (existing.dataset.bpPlaceId === String(placeId)) return;
+    existing.remove();
+  }
 
   ensureStyle();
 
   const li = document.createElement('li');
   li.id = BUTTON_ID;
   li.className = 'bp-folder-btn-li';
+  li.dataset.bpPlaceId = String(placeId);
   li.innerHTML = `
     <button type="button" class="bp-folder-btn" aria-label="Add to folder">
       <span class="bp-folder-btn-icon" aria-hidden="true">
@@ -54,7 +59,10 @@ export async function run(): Promise<void> {
 
   const btn = li.querySelector<HTMLButtonElement>('.bp-folder-btn')!;
   btn.addEventListener('click', async () => {
-    const ctx = await resolveContext(placeId);
+    const livePlaceId = Number(li.dataset.bpPlaceId);
+    if (!Number.isFinite(livePlaceId)) return;
+    const ctx = await resolveContext(livePlaceId);
+    if (!li.isConnected || readPlaceId() !== livePlaceId) return;
     if (!ctx) return;
     void openFolderMenu({
       anchor: btn,
@@ -66,7 +74,9 @@ export async function run(): Promise<void> {
   // Reflect whether the game is already in a folder. Initial paint + live
   // updates on storage change.
   void resolveContext(placeId).then((ctx) => {
+    if (!li.isConnected || readPlaceId() !== placeId) return;
     if (!ctx) return;
+    li.dataset.bpUniverseId = String(ctx.universeId);
     void getFolders().then((state) => syncButtonState(btn, ctx.universeId, state));
     if (!buttonStateSubscribed) {
       buttonStateSubscribed = true;
@@ -74,7 +84,9 @@ export async function run(): Promise<void> {
         const live = document.querySelector<HTMLButtonElement>(
           `#${BUTTON_ID} .bp-folder-btn`
         );
-        if (live && cached) syncButtonState(live, cached.universeId, state);
+        const liveLi = document.getElementById(BUTTON_ID) as HTMLLIElement | null;
+        const universeId = liveLi ? Number(liveLi.dataset.bpUniverseId) : NaN;
+        if (live && Number.isFinite(universeId)) syncButtonState(live, universeId, state);
       });
     }
   });

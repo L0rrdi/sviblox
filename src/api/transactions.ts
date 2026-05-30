@@ -86,7 +86,7 @@ export function sumPurchasesForUniverse(
     if (tx.isPending) continue;
     if (tx.currency?.type !== 'Robux') continue;
     const amt = tx.currency.amount;
-    if (typeof amt !== 'number') continue;
+    if (typeof amt !== 'number' || amt >= 0) continue;
     // Purchases are returned as negative numbers (outgoing). Use abs so the
     // displayed total reads as a positive Robux amount.
     totalRobux += Math.abs(amt);

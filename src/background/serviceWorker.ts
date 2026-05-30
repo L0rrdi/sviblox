@@ -8,6 +8,7 @@ const CACHE_PRUNE_ALARM = 'bloxplus.cachePrune';
 const POLL_INTERVAL_MIN = 1; // chrome.alarms minimum
 const CACHE_PRUNE_INTERVAL_MIN = 60; // hourly
 const AUTH_USER_CACHE_MS = 5 * 60_000;
+const PRESENCE_BATCH_SIZE = 50;
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[SviBlox] installed');
@@ -31,6 +32,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === 'pollNow') {
     void poll().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (
+    message?.type === 'bp-uhbl-scrape-update' &&
+    message.map &&
+    typeof message.map === 'object'
+  ) {
+    queueUhblMediaMerge(message.map as Record<string, string>);
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (
+    message?.type === 'bp-record-last-seen' &&
+    Number.isFinite(message.userId) &&
+    typeof message.ts === 'string'
+  ) {
+    const userId = Number(message.userId);
+    const location = typeof message.location === 'string' ? message.location : undefined;
+    void recordLastSeen({
+      [userId]: { ts: message.ts, location },
+    }).then(
+      () => sendResponse({ ok: true }),
+      (err) => sendResponse({ ok: false, error: String(err) })
+    );
+    return true;
+  }
+  if (message?.type === 'bp-uhbl-sync-via-tab') {
+    void runUhblSyncViaTab(typeof message.timeoutMs === 'number' ? message.timeoutMs : 18_000)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true;
   }
   if (message?.type === 'fetchUrl' && typeof message.url === 'string') {
@@ -108,6 +139,103 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     });
   }
 });
+
+// --- UHBL Google Sheet scraper plumbing -------------------------------------
+//
+// The content scripts in src/content/uhblSheetScraperMain.ts + Bridge.ts run
+// on the public UHBL Google Sheet's edit URL. They monkey-patch fetch/XHR,
+// extract link annotations from response bodies (including the chunks Google
+// lazy-loads after page render), and forward sandwich-paired badge→media URL
+// maps here. We accumulate into bloxplus.uhbl.mediaMap so coverage extends
+// beyond what the static bootstrap exposes (~94 badges).
+
+const UHBL_SHEET_EDIT_URL =
+  'https://docs.google.com/spreadsheets/d/17HE0xTN5tuq8BAkwvtP17tlJW8rpFNI3WzbI4LYXchk/edit?gid=0';
+const UHBL_MEDIA_MAP_KEY = 'bloxplus.uhbl.mediaMap';
+
+let uhblMergeChain: Promise<void> = Promise.resolve();
+let uhblScrapeUpdates = 0;
+
+function queueUhblMediaMerge(update: Record<string, string>): void {
+  uhblMergeChain = uhblMergeChain
+    .then(() => doUhblMediaMerge(update))
+    .catch((e) => console.warn('[SviBlox] uhbl merge failed', e));
+}
+
+async function doUhblMediaMerge(update: Record<string, string>): Promise<void> {
+  if (!update || typeof update !== 'object') return;
+  const got = await chrome.storage.local.get(UHBL_MEDIA_MAP_KEY);
+  const existing = (got[UHBL_MEDIA_MAP_KEY] || {}) as Record<string, string>;
+  let changed = 0;
+  for (const [k, v] of Object.entries(update)) {
+    if (typeof v !== 'string' || !v) continue;
+    if (existing[k] !== v) {
+      existing[k] = v;
+      changed += 1;
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ [UHBL_MEDIA_MAP_KEY]: existing });
+    uhblScrapeUpdates += changed;
+  }
+}
+
+async function runUhblSyncViaTab(
+  timeoutMs: number
+): Promise<{ before: number; after: number; durationMs: number }> {
+  const beforeMap = ((await chrome.storage.local.get(UHBL_MEDIA_MAP_KEY))[
+    UHBL_MEDIA_MAP_KEY
+  ] || {}) as Record<string, string>;
+  const before = Object.keys(beforeMap).length;
+  const startedAt = Date.now();
+  const startedUpdates = uhblScrapeUpdates;
+  const tab = await chrome.tabs.create({
+    url: UHBL_SHEET_EDIT_URL,
+    active: false,
+  });
+  if (!tab.id) throw new Error('Could not open background tab');
+  try {
+    // Wait until the scrape stabilizes (no new entries for STABLE_MS) OR
+    // the absolute timeout fires.
+    const STABLE_MS = 3500;
+    const POLL_INTERVAL = 500;
+    let lastSeen = uhblScrapeUpdates;
+    let lastChangedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    while (Date.now() < deadline) {
+      await sleep(POLL_INTERVAL);
+      if (uhblScrapeUpdates !== lastSeen) {
+        lastSeen = uhblScrapeUpdates;
+        lastChangedAt = Date.now();
+      } else if (
+        uhblScrapeUpdates > startedUpdates &&
+        Date.now() - lastChangedAt >= STABLE_MS
+      ) {
+        break;
+      }
+    }
+    // Wait for any in-flight merge to settle so `after` reflects the final
+    // map size on disk.
+    await uhblMergeChain.catch(() => undefined);
+  } finally {
+    try {
+      await chrome.tabs.remove(tab.id);
+    } catch {
+      // Tab may have already closed.
+    }
+  }
+  const afterMap = ((await chrome.storage.local.get(UHBL_MEDIA_MAP_KEY))[
+    UHBL_MEDIA_MAP_KEY
+  ] || {}) as Record<string, string>;
+  const after = Object.keys(afterMap).length;
+  return { before, after, durationMs: Date.now() - startedAt };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
 
 async function ensureAlarm(): Promise<void> {
   const existing = await chrome.alarms.get(ALARM_NAME);
@@ -210,17 +338,11 @@ async function pollFriendsLastSeen(): Promise<void> {
       lastFriendsPollAt = Date.now();
       return;
     }
-    const presenceResp = await postWithCsrf(
-      'https://presence.roblox.com/v1/presence/users',
-      JSON.stringify({ userIds: friendIds })
-    );
-    if (!presenceResp || !presenceResp.ok) return;
-    const presenceData = (await presenceResp.json()) as {
-      userPresences?: Array<{ userId: number; userPresenceType: number; lastLocation?: string }>;
-    };
+    const presences = await getPresenceRows(friendIds);
+    if (!presences.length) return;
     const now = new Date().toISOString();
     const updates: LastSeenMap = {};
-    for (const p of presenceData.userPresences ?? []) {
+    for (const p of presences) {
       // 1 = Online (Website), 2 = InGame, 3 = InStudio. Skip 0 Offline and 4 Invisible.
       if (p.userPresenceType >= 1 && p.userPresenceType <= 3) {
         updates[p.userId] = { ts: now, location: p.lastLocation };
@@ -236,6 +358,25 @@ async function pollFriendsLastSeen(): Promise<void> {
   } finally {
     friendsPollInFlight = false;
   }
+}
+
+async function getPresenceRows(
+  userIds: number[]
+): Promise<Array<{ userId: number; userPresenceType: number; lastLocation?: string }>> {
+  const rows: Array<{ userId: number; userPresenceType: number; lastLocation?: string }> = [];
+  for (let i = 0; i < userIds.length; i += PRESENCE_BATCH_SIZE) {
+    const batch = userIds.slice(i, i + PRESENCE_BATCH_SIZE);
+    const presenceResp = await postWithCsrf(
+      'https://presence.roblox.com/v1/presence/users',
+      JSON.stringify({ userIds: batch })
+    );
+    if (!presenceResp || !presenceResp.ok) continue;
+    const presenceData = (await presenceResp.json()) as {
+      userPresences?: Array<{ userId: number; userPresenceType: number; lastLocation?: string }>;
+    };
+    rows.push(...(presenceData.userPresences ?? []));
+  }
+  return rows;
 }
 
 function isAllowedFetchUrl(url: URL): boolean {

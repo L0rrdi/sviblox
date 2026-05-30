@@ -269,6 +269,7 @@ const SYNC_ITEM_QUOTA = 8192;
 // is "you probably have stale cache buildup" territory.
 const LOCAL_SOFT_TARGET = 20 * 1024 * 1024;
 const LOCAL_SOFT_DANGER = 50 * 1024 * 1024;
+const ACTION_CANCELLED = Symbol('action-cancelled');
 
 const LOCAL_KEY_LABELS: Record<string, string> = {
   'bloxplus.customizations': 'Customize edits',
@@ -279,6 +280,8 @@ const LOCAL_KEY_LABELS: Record<string, string> = {
   'bloxplus.userThemes': 'Theme presets (incl. images)',
   'bloxplus.playtime': 'Playtime entries',
   'bloxplus.uhbl.sheet': 'UHBL sheet snapshot',
+  'bloxplus.uhbl.mediaMap': 'UHBL video URL map (accumulated across refreshes)',
+  'bloxplus.uhbl.mediaMeta': 'UHBL media-fetch metadata',
   'bloxplus.lastPreImportBackup': 'Pre-import restore backup (legacy)',
   'bloxplus.preImportBackups': `Pre-import restore history (last ${PRE_IMPORT_BACKUP_MAX})`,
 };
@@ -333,11 +336,15 @@ function StorageManager() {
     return () => chrome.storage.onChanged.removeListener(onChange);
   }, []);
 
-  const runAction = async (label: string, action: () => Promise<number | void>): Promise<void> => {
+  const runAction = async (
+    label: string,
+    action: () => Promise<number | void | typeof ACTION_CANCELLED>
+  ): Promise<void> => {
     if (busy) return;
     setBusy(true);
     try {
       const result = await action();
+      if (result === ACTION_CANCELLED) return;
       const tail = typeof result === 'number' ? ` (${result} item${result === 1 ? '' : 's'})` : '';
       setStatus({ kind: 'ok', text: `${label}${tail}.` });
       await refresh();
@@ -352,13 +359,13 @@ function StorageManager() {
     const settings = await getSettings();
     const count = Object.keys(settings.gameHotkeys ?? {}).length;
     if (!count) return 0;
-    if (!confirm(`Clear all ${count} hotkey${count === 1 ? '' : 's'}? You can rebind from the popup.`)) return;
+    if (!confirm(`Clear all ${count} hotkey${count === 1 ? '' : 's'}? You can rebind from the popup.`)) return ACTION_CANCELLED;
     await setSettings({ gameHotkeys: {} });
     return count;
   });
 
   const resetSchedule = (): Promise<void> => runAction('Theme schedule reset', async () => {
-    if (!confirm('Reset theme schedule to default 2 slots (disabled)? Your currently active themeId is unaffected.')) return;
+    if (!confirm('Reset theme schedule to default 2 slots (disabled)? Your currently active themeId is unaffected.')) return ACTION_CANCELLED;
     await setSettings({ themeSchedule: getDefaultThemeSchedule() });
   });
 
@@ -371,11 +378,15 @@ function StorageManager() {
   });
 
   const dropUhbl = (): Promise<void> => runAction('UHBL snapshot dropped', async () => {
-    await chrome.storage.local.remove('bloxplus.uhbl.sheet');
+    await chrome.storage.local.remove([
+      'bloxplus.uhbl.sheet',
+      'bloxplus.uhbl.mediaMap',
+      'bloxplus.uhbl.mediaMeta',
+    ]);
   });
 
   const dropLastSeen = (): Promise<void> => runAction('Last-seen snapshots dropped', async () => {
-    if (!confirm('Drop friend last-seen snapshots? The background poll will rebuild them as friends go online again.')) return;
+    if (!confirm('Drop friend last-seen snapshots? The background poll will rebuild them as friends go online again.')) return ACTION_CANCELLED;
     await chrome.storage.local.remove('bloxplus.lastSeen');
   });
 
@@ -384,7 +395,7 @@ function StorageManager() {
   });
 
   const dropLegacyTheme = (): Promise<void> => runAction('Legacy custom theme dropped', async () => {
-    if (!confirm('Drop the legacy bloxplus.customTheme slot? Your saved themes in the new multi-preset list are unaffected. Only kept around for downgrade compatibility.')) return;
+    if (!confirm('Drop the legacy bloxplus.customTheme slot? Your saved themes in the new multi-preset list are unaffected. Only kept around for downgrade compatibility.')) return ACTION_CANCELLED;
     await chrome.storage.local.remove('bloxplus.customTheme');
   });
 
@@ -396,7 +407,7 @@ function StorageManager() {
     );
     const dropped = entries.length - kept.length;
     if (!dropped) return 0;
-    if (!confirm(`Drop ${dropped} playtime entr${dropped === 1 ? 'y' : 'ies'} with no name and no universeId?`)) return;
+    if (!confirm(`Drop ${dropped} playtime entr${dropped === 1 ? 'y' : 'ies'} with no name and no universeId?`)) return ACTION_CANCELLED;
     await setPlaytime(kept);
     return dropped;
   });
@@ -678,6 +689,11 @@ function PlaytimeManager() {
 
   useEffect(() => {
     void reload();
+    const onChange = (changes: Record<string, chrome.storage.StorageChange>, area: string): void => {
+      if (area === 'local' && changes[PLAYTIME_BACKUP_KEY]) void reload();
+    };
+    chrome.storage.onChanged.addListener(onChange);
+    return () => chrome.storage.onChanged.removeListener(onChange);
   }, []);
 
   useEffect(() => {
@@ -717,7 +733,7 @@ function PlaytimeManager() {
           return playtimeEntryLabel(a.entry, hydratedNames).localeCompare(playtimeEntryLabel(b.entry, hydratedNames));
         }
         if (sort === 'recent') {
-          return Date.parse(b.entry.lastPlayedAt ?? '') - Date.parse(a.entry.lastPlayedAt ?? '');
+          return parseIsoTime(b.entry.lastPlayedAt) - parseIsoTime(a.entry.lastPlayedAt);
         }
         return (b.entry.totalSeconds ?? 0) - (a.entry.totalSeconds ?? 0);
       });
@@ -725,8 +741,6 @@ function PlaytimeManager() {
 
   const selected =
     visibleEntries.find((item) => item.key === selectedKey) ??
-    entries.map((entry, index) => ({ entry, index, key: playtimeEntryKey(entry, index) }))
-      .find((item) => item.key === selectedKey) ??
     visibleEntries[0] ??
     null;
 
@@ -844,6 +858,8 @@ function PlaytimeManager() {
 
       {!entries.length ? (
         <p>No playtime entries yet.</p>
+      ) : !visibleEntries.length ? (
+        <p>No playtime entries match your search.</p>
       ) : (
         <div className="adv-playtime-editor">
           <label>
@@ -1161,6 +1177,11 @@ function latestIso(a?: string, b?: string): string | undefined {
   if (!a) return b;
   if (!b) return a;
   return b > a ? b : a;
+}
+
+function parseIsoTime(value: string | undefined): number {
+  const ts = Date.parse(value ?? '');
+  return Number.isFinite(ts) ? ts : 0;
 }
 
 const advancedCss = `

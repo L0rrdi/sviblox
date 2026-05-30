@@ -69,7 +69,11 @@ export async function run(): Promise<void> {
     state &&
     state.colorRarity === wantsColor
   ) {
-    if (container.style.display !== 'none') hideExisting(container);
+    // hideExisting is idempotent per child via the data-bp-badge-hidden
+    // attr, so calling it every dispatch tick is cheap and catches any
+    // new children Roblox might append (e.g., load-more buttons) after
+    // our initial pass.
+    hideExisting(container);
     return;
   }
   if (renderedFor === placeId && sectionInDom && state) {
@@ -387,13 +391,21 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
 
   const wonEver = (b: BadgeDetail) => b.statistics?.awardedCount ?? -1;
   const wonY = (b: BadgeDetail) => b.statistics?.pastDayAwardedCount ?? -1;
+  const tier = (b: BadgeDetail) =>
+    rarityTierIndex(b.statistics?.pastDayAwardedCount, b.statistics?.awardedCount);
 
   switch (s.sort) {
     case 'rarest':
-      // Smaller total awarded = rarer. Tie-break by awarded yesterday (also
-      // ascending), so two badges with the same lifetime total are ordered by
-      // recent activity.
-      arr.sort((a, b) => wonEver(a) - wonEver(b) || wonY(a) - wonY(b));
+      // Sort by rarity tier descending (Impossible → Easy), same formula as
+      // the Rarity column so the order matches what the user sees. Within
+      // a tier, ascending yesterday count puts the rarer-within-tier badges
+      // first; lifetime count is the final tiebreaker.
+      arr.sort(
+        (a, b) =>
+          tier(b) - tier(a) ||
+          wonY(a) - wonY(b) ||
+          wonEver(a) - wonEver(b)
+      );
       break;
     case 'most-won':
       arr.sort((a, b) => wonEver(b) - wonEver(a));
@@ -436,13 +448,17 @@ function renderBadge(
 ): string {
   const owned = !!awardedDate;
   const url = `https://www.roblox.com/badges/${b.id}/${slug(b.displayName ?? b.name)}`;
-  const winRate = b.statistics?.winRatePercentage;
-  const rarityClass = colorRarity ? rarityBucket(winRate) : '';
-  const rarityLabel = rarityName(winRate);
-  const winRateStr =
-    typeof winRate === 'number' ? `${(winRate * 100).toFixed(1)}%` : '—';
   const yesterday = b.statistics?.pastDayAwardedCount;
   const ever = b.statistics?.awardedCount;
+  const winRate = b.statistics?.winRatePercentage;
+  // Rarity tier is yesterday-based; lifetime ever is used as a floor so
+  // a badge with 0 yesterday but high lifetime count doesn't drop to
+  // "Impossible". Lifetime % is kept only as tooltip context.
+  const rarityClass = colorRarity ? rarityBucket(yesterday, ever) : '';
+  const rarityLabel = rarityName(yesterday, ever);
+  const lifetimePctStr =
+    typeof winRate === 'number' ? `${(winRate * 100).toFixed(2)}% lifetime` : '';
+  const rarityTooltip = [rarityLabel, lifetimePctStr].filter(Boolean).join(' · ');
 
   return `
     <div class="bp-badge-row ${owned ? 'bp-owned' : 'bp-locked'}">
@@ -459,7 +475,7 @@ function renderBadge(
       <div class="bp-badge-stats">
         <div class="bp-stat-block">
           <div class="bp-stat-label">Rarity</div>
-          <div class="bp-stat-value ${rarityClass}" title="${rarityLabel}">${winRateStr}</div>
+          <div class="bp-stat-value ${rarityClass}" title="${rarityTooltip}">${rarityLabel}</div>
         </div>
         <div class="bp-stat-block">
           <div class="bp-stat-label">Won Yesterday</div>
@@ -474,24 +490,51 @@ function renderBadge(
   `;
 }
 
-function rarityBucket(winRate: number | undefined): string {
-  if (typeof winRate !== 'number') return '';
-  const pct = winRate * 100;
-  if (pct >= 50) return 'bp-rarity-easy';
-  if (pct >= 20) return 'bp-rarity-medium';
-  if (pct >= 5) return 'bp-rarity-hard';
-  if (pct >= 1) return 'bp-rarity-insane';
-  return 'bp-rarity-impossible';
+// Rarity is computed from `pastDayAwardedCount` (badges won yesterday)
+// rather than the lifetime `winRatePercentage`. Lifetime % mostly
+// measures how long the game has been popular — a years-old game with
+// millions of casual players inflates the denominator and makes every
+// badge look "impossible" regardless of how hard it actually is right
+// now. Yesterday's count tracks current active-player effort, which is
+// the more honest signal.
+//
+// The 0-yesterday case is special: a badge that's been earned tens of
+// thousands of times lifetime but happens to have 0 yesterday is not
+// "Impossible" — it's just not active today (could be a snapshot blip,
+// or the game's playerbase is small but consistent). So we use lifetime
+// `awardedCount` as a sanity floor for the bottom bucket.
+//
+// rarityTierIndex returns a numeric tier (0=Easy → 4=Impossible) so the
+// "Rarest first" sort can use the same formula as the Rarity column.
+// Without this, the sort drifted off lifetime `awardedCount` while the
+// column used yesterday — making the sorted list look scrambled.
+function rarityTierIndex(yesterday: number | undefined, ever: number | undefined): number {
+  if (typeof yesterday !== 'number') return -1;
+  if (yesterday >= 1000) return 0; // Easy
+  if (yesterday >= 100) return 1; // Medium
+  if (yesterday >= 10) return 2; // Hard
+  if (yesterday >= 1) return 3; // Insane
+  if (typeof ever === 'number' && ever >= 10000) return 3; // Insane (historical)
+  return 4; // Impossible
 }
 
-function rarityName(winRate: number | undefined): string {
-  if (typeof winRate !== 'number') return 'Unknown';
-  const pct = winRate * 100;
-  if (pct >= 50) return 'Easy';
-  if (pct >= 20) return 'Medium';
-  if (pct >= 5) return 'Hard';
-  if (pct >= 1) return 'Insane';
-  return 'Impossible';
+const TIER_CLASSES = [
+  'bp-rarity-easy',
+  'bp-rarity-medium',
+  'bp-rarity-hard',
+  'bp-rarity-insane',
+  'bp-rarity-impossible',
+];
+const TIER_NAMES = ['Easy', 'Medium', 'Hard', 'Insane', 'Impossible'];
+
+function rarityBucket(yesterday: number | undefined, ever: number | undefined): string {
+  const idx = rarityTierIndex(yesterday, ever);
+  return idx < 0 ? '' : TIER_CLASSES[idx];
+}
+
+function rarityName(yesterday: number | undefined, ever: number | undefined): string {
+  const idx = rarityTierIndex(yesterday, ever);
+  return idx < 0 ? 'Unknown' : TIER_NAMES[idx];
 }
 
 function slug(s: string): string {

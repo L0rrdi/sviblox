@@ -9,6 +9,7 @@
  */
 
 const KEY = 'bloxplus.lastSeen';
+let writeChain: Promise<void> = Promise.resolve();
 
 export interface LastSeenRow {
   /** ISO 8601 UTC timestamp when we last observed this user as online. */
@@ -32,6 +33,10 @@ export async function getLastSeenForUser(userId: number): Promise<LastSeenRow | 
 /** Merge-in updates — only changes the listed user IDs, preserves the rest. */
 export async function recordLastSeen(updates: LastSeenMap): Promise<void> {
   if (Object.keys(updates).length === 0) return;
-  const cur = await getLastSeenMap();
-  await chrome.storage.local.set({ [KEY]: { ...cur, ...updates } });
+  const write = writeChain.then(async () => {
+    const cur = await getLastSeenMap();
+    await chrome.storage.local.set({ [KEY]: { ...cur, ...updates } });
+  });
+  writeChain = write.then(() => undefined, () => undefined);
+  await write;
 }

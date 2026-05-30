@@ -23,6 +23,8 @@ let placeToUniverse: Map<number, number> = new Map();
 let mapBuiltForUserId: number | null = null;
 let removeButtonsInstalled = false;
 let isOwnFavoritesPage = false;
+let runSeq = 0;
+const tileListeners = new WeakMap<HTMLElement, AbortController>();
 
 export async function run(): Promise<void> {
   const userId = readFavoritesPageUserId();
@@ -36,9 +38,12 @@ export async function run(): Promise<void> {
     return;
   }
 
+  const path = location.pathname;
+  const seq = ++runSeq;
   // Only your own list. Roblox accepts favorite-toggle calls only with the
   // authenticated user's session, but better to no-op visually too.
   const me = await getAuthenticatedUserId();
+  if (isStale(seq, path, userId)) return;
   isOwnFavoritesPage = me === userId;
   if (!isOwnFavoritesPage) {
     removeAllDecorations();
@@ -46,6 +51,7 @@ export async function run(): Promise<void> {
   }
 
   await ensureFavoritesMap(userId);
+  if (isStale(seq, path, userId)) return;
   ensureStyle();
   if (!removeButtonsInstalled) {
     removeButtonsInstalled = true;
@@ -61,8 +67,18 @@ export async function run(): Promise<void> {
 }
 
 function cleanup(): void {
+  runSeq += 1;
   removeAllDecorations();
   dismissToast();
+}
+
+function isStale(seq: number, path: string, userId: number): boolean {
+  return (
+    seq !== runSeq ||
+    location.pathname !== path ||
+    readFavoritesPageUserId() !== userId ||
+    !isPlacesHash()
+  );
 }
 
 function isPlacesHash(): boolean {
@@ -106,6 +122,7 @@ function decorate(): void {
       const tagged = tile.getAttribute(DECORATED_ATTR);
       if (placeId && tagged === String(placeId)) continue;
       tile.querySelector('.bp-fav-remove-btn')?.remove();
+      clearTileListeners(tile);
       tile.removeAttribute(DECORATED_ATTR);
     }
     const placeId = extractPlaceId(tile);
@@ -121,6 +138,7 @@ function removeAllDecorations(): void {
   for (const tile of document.querySelectorAll<HTMLElement>(`[${DECORATED_ATTR}]`)) {
     tile.removeAttribute(DECORATED_ATTR);
     tile.querySelector('.bp-fav-remove-btn')?.remove();
+    clearTileListeners(tile);
   }
 }
 
@@ -153,11 +171,19 @@ function buildRemoveButton(
   // the visible class on pointerenter / pointerleave at the tile level.
   const show = () => btn.classList.add('bp-fav-remove-btn-visible');
   const hide = () => btn.classList.remove('bp-fav-remove-btn-visible');
-  tile.addEventListener('pointerenter', show);
-  tile.addEventListener('pointerleave', hide);
-  tile.addEventListener('focusin', show);
-  tile.addEventListener('focusout', hide);
+  const controller = new AbortController();
+  clearTileListeners(tile);
+  tile.addEventListener('pointerenter', show, { signal: controller.signal });
+  tile.addEventListener('pointerleave', hide, { signal: controller.signal });
+  tile.addEventListener('focusin', show, { signal: controller.signal });
+  tile.addEventListener('focusout', hide, { signal: controller.signal });
+  tileListeners.set(tile, controller);
   return btn;
+}
+
+function clearTileListeners(tile: HTMLElement): void {
+  tileListeners.get(tile)?.abort();
+  tileListeners.delete(tile);
 }
 
 async function handleRemove(

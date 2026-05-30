@@ -12,6 +12,7 @@ const STYLE_ID = 'bloxplus-item-bundles-style';
 
 let renderedFor: number | null = null;
 let renderedHadPanel = false;
+let loadSeq = 0;
 
 export async function run(): Promise<void> {
   const assetId = parseCatalogAssetId();
@@ -28,8 +29,10 @@ export async function run(): Promise<void> {
     }
   }
 
+  const seq = ++loadSeq;
+  const path = location.pathname;
   const anchor = await waitFor<HTMLElement>(() => findInsertionAnchor());
-  if (!anchor) return;
+  if (!anchor || isStale(seq, path, assetId)) return;
 
   let bundles: CatalogBundle[] = [];
   try {
@@ -37,6 +40,7 @@ export async function run(): Promise<void> {
   } catch {
     return;
   }
+  if (isStale(seq, path, assetId)) return;
 
   document.getElementById(ROOT_ID)?.remove();
   renderedFor = assetId;
@@ -44,6 +48,7 @@ export async function run(): Promise<void> {
   if (!bundles.length) return;
 
   const thumbs = await getBundleThumbnails(bundles.map((b) => b.id));
+  if (isStale(seq, path, assetId) || !anchor.isConnected) return;
   anchor.insertAdjacentElement('afterend', renderBundlePanel(bundles, thumbs));
 }
 
@@ -51,6 +56,7 @@ function cleanup(): void {
   document.getElementById(ROOT_ID)?.remove();
   renderedFor = null;
   renderedHadPanel = false;
+  loadSeq += 1;
 }
 
 function parseCatalogAssetId(): number | null {
@@ -66,6 +72,10 @@ function findInsertionAnchor(): HTMLElement | null {
   const info = document.querySelector<HTMLElement>('.shopping-cart.item-details-info-content');
   if (info) return info;
   return null;
+}
+
+function isStale(seq: number, path: string, assetId: number): boolean {
+  return seq !== loadSeq || location.pathname !== path || parseCatalogAssetId() !== assetId;
 }
 
 function renderBundlePanel(
