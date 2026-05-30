@@ -70,7 +70,7 @@ export interface Settings {
   /** Which folder is active on home page load. */
   foldersFolderSelection: 'previous' | 'random';
   /** How games are ordered inside the active folder. */
-  foldersGamesSort: 'most-active' | 'least-active';
+  foldersGamesSort: 'most-active' | 'least-active' | 'random';
   /**
    * Service-worker presence polling AND the "Your Most Played" home widget.
    * One toggle for the whole playtime feature.

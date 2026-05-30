@@ -173,24 +173,33 @@ function ensureStyle(): void {
       position: relative;
     }
     #${WIDGET_ID} .bp-row {
-      display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 6px 0;
-      scrollbar-width: thin;
+      display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 0 0;
+      scrollbar-width: none;
       scroll-behavior: smooth;
     }
-    #${WIDGET_ID} .bp-row::-webkit-scrollbar { height: 6px; }
-    #${WIDGET_ID} .bp-row::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+    #${WIDGET_ID} .bp-row::-webkit-scrollbar { display: none; }
     #${WIDGET_ID} .bp-arrow {
-      position: absolute; top: 40px; transform: translateY(-50%);
-      width: 28px; height: 28px; border-radius: 50%;
-      background: rgba(0,0,0,0.55); color: #fff; border: none;
-      cursor: pointer; font-size: 14px; line-height: 1;
+      position: absolute; top: calc(50% - 20px);
+      width: 40px; height: 40px; border-radius: 50%;
+      background: rgb(25,26,31); color: rgb(247,247,248); border: none;
+      cursor: pointer; font-size: 28px; line-height: 1;
       display: flex; align-items: center; justify-content: center;
-      opacity: 0; transition: opacity 0.15s;
-      z-index: 2;
+      opacity: 0; transition: opacity 0.15s ease, background-color 0.15s ease;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+      z-index: 5;
+      padding: 0;
     }
-    #${WIDGET_ID}:hover .bp-arrow { opacity: 1; }
-    #${WIDGET_ID} .bp-arrow.bp-left { left: -4px; }
-    #${WIDGET_ID} .bp-arrow.bp-right { right: -4px; }
+    #${WIDGET_ID} .bp-scroll:hover .bp-arrow { opacity: 0.9; }
+    #${WIDGET_ID} .bp-arrow:hover { background: rgb(36,37,43); opacity: 1; }
+    #${WIDGET_ID} .bp-arrow[hidden] { display: none; }
+    #${WIDGET_ID} .bp-arrow.bp-left { left: -12px; }
+    #${WIDGET_ID} .bp-arrow.bp-right { right: -12px; }
+    #${WIDGET_ID} .bp-arrow .icon-chevron-heavy-left,
+    #${WIDGET_ID} .bp-arrow .icon-chevron-heavy-right {
+      width: 28px; height: 28px;
+      display: inline-block;
+      pointer-events: none;
+    }
     #${WIDGET_ID} .bp-tile {
       flex: 0 0 auto; width: 100px; text-decoration: none; color: inherit;
     }
@@ -241,6 +250,7 @@ interface WidgetState {
 let widget: HTMLElement | null = null;
 let state: WidgetState | null = null;
 let playtimeSubscribed = false;
+const activeScrollAnimations = new WeakMap<HTMLElement, number>();
 
 /**
  * Live-refresh hook: the SW per-minute presence accumulator writes to
@@ -327,9 +337,9 @@ export async function run(settings: Settings): Promise<void> {
     </div>
     <div class="bp-meta"></div>
     <div class="bp-scroll">
-      <button class="bp-arrow bp-left" aria-label="Scroll left">‹</button>
+      <button type="button" class="bp-arrow bp-left scroller-new prev" aria-label="Scroll left" hidden><span class="icon-chevron-heavy-left" aria-hidden="true"></span></button>
       <div class="bp-row"></div>
-      <button class="bp-arrow bp-right" aria-label="Scroll right">›</button>
+      <button type="button" class="bp-arrow bp-right scroller-new next" aria-label="Scroll right" hidden><span class="icon-chevron-heavy-right" aria-hidden="true"></span></button>
     </div>
   `;
   row.appendChild(widget);
@@ -366,11 +376,12 @@ export async function run(settings: Settings): Promise<void> {
   // Arrow scroll.
   const scrollEl = widget.querySelector('.bp-row') as HTMLElement;
   widget.querySelector('.bp-left')!.addEventListener('click', () =>
-    scrollEl.scrollBy({ left: -440, behavior: 'smooth' })
+    scrollMostPlayedRow(scrollEl, -1)
   );
   widget.querySelector('.bp-right')!.addEventListener('click', () =>
-    scrollEl.scrollBy({ left: 440, behavior: 'smooth' })
+    scrollMostPlayedRow(scrollEl, 1)
   );
+  bindMostPlayedArrowState(widget, scrollEl);
 
   renderTiles();
 }
@@ -431,6 +442,69 @@ function wireVisibilityToggle(widgetEl: HTMLElement): void {
   });
 }
 
+function bindMostPlayedArrowState(widgetEl: HTMLElement, row: HTMLElement): void {
+  if (row.dataset.bpArrowObs) return;
+  row.dataset.bpArrowObs = '1';
+  let raf = 0;
+  const schedule = (): void => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      updateMostPlayedArrows(widgetEl);
+    });
+  };
+  row.addEventListener('scroll', schedule, { passive: true });
+  new ResizeObserver(schedule).observe(row);
+  new MutationObserver(schedule).observe(row, { childList: true });
+  schedule();
+}
+
+function updateMostPlayedArrows(widgetEl: HTMLElement): void {
+  const row = widgetEl.querySelector('.bp-row');
+  const left = widgetEl.querySelector('.bp-left');
+  const right = widgetEl.querySelector('.bp-right');
+  if (
+    !(row instanceof HTMLElement) ||
+    !(left instanceof HTMLElement) ||
+    !(right instanceof HTMLElement)
+  ) {
+    return;
+  }
+  const max = row.scrollWidth - row.clientWidth;
+  const scrollable = max > 1;
+  left.hidden = !scrollable || row.scrollLeft <= 1;
+  right.hidden = !scrollable || row.scrollLeft >= max - 1;
+}
+
+function scrollMostPlayedRow(row: HTMLElement, direction: -1 | 1): void {
+  const max = Math.max(0, row.scrollWidth - row.clientWidth);
+  const amount = Math.max(320, Math.floor(row.clientWidth * 0.85));
+  animateMostPlayedScroll(row, Math.min(max, Math.max(0, row.scrollLeft + direction * amount)));
+}
+
+function animateMostPlayedScroll(row: HTMLElement, target: number): void {
+  const previous = activeScrollAnimations.get(row);
+  if (previous) cancelAnimationFrame(previous);
+
+  const start = row.scrollLeft;
+  const delta = target - start;
+  if (Math.abs(delta) < 1) return;
+
+  const duration = 420;
+  const startedAt = performance.now();
+  const easeOutCubic = (t: number): number => 1 - Math.pow(1 - t, 3);
+  const tick = (now: number): void => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    row.scrollLeft = start + delta * easeOutCubic(progress);
+    if (progress < 1) {
+      activeScrollAnimations.set(row, requestAnimationFrame(tick));
+      return;
+    }
+    activeScrollAnimations.delete(row);
+  };
+  activeScrollAnimations.set(row, requestAnimationFrame(tick));
+}
+
 function passesRecency(e: GamePlaytimeEntry, w: WindowKey): boolean {
   const ms = WINDOW_MS[w];
   if (ms === null) return true;
@@ -466,6 +540,7 @@ function renderTiles(): void {
   const rowEl = widget.querySelector('.bp-row') as HTMLElement;
   if (!top.length) {
     rowEl.innerHTML = `<div class="bp-empty">No games tracked in this window.</div>`;
+    updateMostPlayedArrows(widget);
     return;
   }
 
@@ -490,6 +565,7 @@ function renderTiles(): void {
       `;
     })
     .join('');
+  updateMostPlayedArrows(widget);
 }
 
 /**

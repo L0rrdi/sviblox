@@ -79,16 +79,14 @@ export function ensureFavoritesStyle(): void {
       gap: 12px;
       overflow-x: auto;
       scroll-behavior: smooth;
-      padding-bottom: 8px;
-      scrollbar-width: thin;
+      padding-bottom: 0;
+      scrollbar-width: none;
       list-style: none;
       margin: 0;
       padding-left: 0;
     }
-    .bp-fav-row::-webkit-scrollbar { height: 6px; }
-    .bp-fav-row::-webkit-scrollbar-thumb {
-      background: rgba(255,255,255,0.2); border-radius: 3px;
-    }
+    /* Scrollbar removed in favour of the hover arrows (see ensureHomeListScroller). */
+    .bp-fav-row::-webkit-scrollbar { display: none; }
     .bp-fav-tile {
       text-decoration: none; color: inherit; display: block;
       flex: 0 0 auto; width: 150px;
@@ -156,24 +154,38 @@ export function ensureFavoritesStyle(): void {
       flex: 0 0 auto;
     }
     .bp-fav-arrow {
-      position: absolute; top: 75px; transform: translateY(-50%);
-      width: 30px; height: 30px; border-radius: 50%;
-      background: rgba(0,0,0,0.55); color: #fff; border: none;
-      cursor: pointer; font-size: 16px; line-height: 1;
+      position: absolute; top: calc(50% - 20px);
+      width: 40px; height: 40px; border-radius: 50%;
+      background: rgb(25,26,31); color: rgb(247,247,248); border: none;
+      cursor: pointer; font-size: 28px; line-height: 1;
       display: flex; align-items: center; justify-content: center;
-      opacity: 0; transition: opacity 0.15s;
-      z-index: 2;
+      opacity: 0; transition: opacity 0.15s ease, background-color 0.15s ease;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+      z-index: 5;
       font-family: inherit;
+      padding: 0;
     }
-    #${FAVORITES_SECTION_ID}:hover .bp-fav-arrow,
-    #${MY_GAMES_SECTION_ID}:hover .bp-fav-arrow {
+    /* Fade the arrows in on row hover, so every custom row (Favorites, My Games,
+       Folders, extra folder rows) behaves identically — not tied to a section id. */
+    .bp-fav-scroll:hover .bp-fav-arrow {
+      opacity: 0.9;
+    }
+    /* Arrows are toggled off via the hidden property at the scroll extents.
+       This explicit rule is required because .bp-fav-arrow sets display:flex,
+       which would otherwise win over the UA [hidden] display:none. */
+    .bp-fav-arrow[hidden] { display: none; }
+    .bp-fav-arrow:hover {
+      background: rgb(36,37,43);
       opacity: 1;
     }
-    .bp-fav-arrow:hover {
-      background: rgba(0,0,0,0.7);
+    .bp-fav-arrow.bp-fav-left { left: -12px; }
+    .bp-fav-arrow.bp-fav-right { right: -12px; }
+    .bp-fav-arrow .icon-chevron-heavy-left,
+    .bp-fav-arrow .icon-chevron-heavy-right {
+      width: 28px; height: 28px;
+      display: inline-block;
+      pointer-events: none;
     }
-    .bp-fav-arrow.bp-fav-left { left: -8px; }
-    .bp-fav-arrow.bp-fav-right { right: -8px; }
     .bp-fav-empty, .bp-fav-error {
       font-size: 13px; opacity: 0.7; padding: 12px 0;
     }
@@ -199,6 +211,7 @@ export interface HomeListSnapshot {
 // re-fetch, producing a visible flicker. Track the last-applied snapshot per
 // section and skip the writes when it has not changed.
 const appliedSnapshots = new WeakMap<HTMLElement, HomeListSnapshot>();
+const activeScrollAnimations = new WeakMap<HTMLElement, number>();
 
 export function applyHomeListSnapshot(section: HTMLElement, snapshot: HomeListSnapshot): void {
   ensureHomeListScroller(section);
@@ -242,22 +255,26 @@ export function ensureHomeListScroller(section: HTMLElement): void {
     row.insertAdjacentElement('beforebegin', scroll);
 
     const left = document.createElement('button');
-    left.className = 'bp-fav-arrow bp-fav-left';
+    left.className = 'bp-fav-arrow bp-fav-left scroller-new prev';
     left.type = 'button';
+    left.hidden = true;
     left.setAttribute('aria-label', 'Scroll left');
-    left.innerHTML = '&lsaquo;';
+    left.innerHTML = '<span class="icon-chevron-heavy-left" aria-hidden="true"></span>';
 
     const right = document.createElement('button');
-    right.className = 'bp-fav-arrow bp-fav-right';
+    right.className = 'bp-fav-arrow bp-fav-right scroller-new next';
     right.type = 'button';
+    right.hidden = true;
     right.setAttribute('aria-label', 'Scroll right');
-    right.innerHTML = '&rsaquo;';
+    right.innerHTML = '<span class="icon-chevron-heavy-right" aria-hidden="true"></span>';
 
     scroll.append(left, row, right);
   }
 
   const left = scroll.querySelector('.bp-fav-left');
   const right = scroll.querySelector('.bp-fav-right');
+  ensureHomeListArrowMarkup(left, 'left');
+  ensureHomeListArrowMarkup(right, 'right');
   if (left instanceof HTMLButtonElement && !left.dataset.bpScrollBound) {
     left.dataset.bpScrollBound = '1';
     left.addEventListener('click', () => scrollHomeList(row, -1));
@@ -266,11 +283,86 @@ export function ensureHomeListScroller(section: HTMLElement): void {
     right.dataset.bpScrollBound = '1';
     right.addEventListener('click', () => scrollHomeList(row, 1));
   }
+
+  // Keep the arrows in sync with scroll position: hide the left arrow at the
+  // start, the right arrow at the end, and both when the row doesn't overflow.
+  // Bound once per row, then driven by scroll / resize / content changes.
+  if (!row.dataset.bpArrowObs) {
+    row.dataset.bpArrowObs = '1';
+    const scrollEl = scroll;
+    let raf = 0;
+    const schedule = (): void => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        updateHomeListArrows(scrollEl);
+      });
+    };
+    row.addEventListener('scroll', schedule, { passive: true });
+    new ResizeObserver(schedule).observe(row);
+    // Tiles are swapped via innerHTML on render; childList catches that so the
+    // arrows re-evaluate once new tiles change the scrollable width.
+    new MutationObserver(schedule).observe(row, { childList: true });
+  }
+  updateHomeListArrows(scroll);
+}
+
+function ensureHomeListArrowMarkup(el: Element | null, direction: 'left' | 'right'): void {
+  if (!(el instanceof HTMLButtonElement)) return;
+  const nativeDirectionClass = direction === 'left' ? 'prev' : 'next';
+  const iconClass =
+    direction === 'left' ? 'icon-chevron-heavy-left' : 'icon-chevron-heavy-right';
+  el.classList.add('scroller-new', nativeDirectionClass);
+  if (!el.querySelector(`.${iconClass}`)) {
+    el.innerHTML = `<span class="${iconClass}" aria-hidden="true"></span>`;
+  }
+}
+
+/** Hides the scroll arrows at the row's extents / when it doesn't overflow. */
+function updateHomeListArrows(scroll: HTMLElement): void {
+  const row = scroll.querySelector('.bp-fav-row');
+  const left = scroll.querySelector('.bp-fav-left');
+  const right = scroll.querySelector('.bp-fav-right');
+  if (
+    !(row instanceof HTMLElement) ||
+    !(left instanceof HTMLElement) ||
+    !(right instanceof HTMLElement)
+  ) {
+    return;
+  }
+  const max = row.scrollWidth - row.clientWidth;
+  const scrollable = max > 1;
+  left.hidden = !scrollable || row.scrollLeft <= 1;
+  right.hidden = !scrollable || row.scrollLeft >= max - 1;
 }
 
 function scrollHomeList(row: HTMLElement, direction: -1 | 1): void {
+  const max = Math.max(0, row.scrollWidth - row.clientWidth);
   const amount = Math.max(420, Math.floor(row.clientWidth * 0.85));
-  row.scrollBy({ left: direction * amount, behavior: 'smooth' });
+  animateHomeListScroll(row, Math.min(max, Math.max(0, row.scrollLeft + direction * amount)));
+}
+
+function animateHomeListScroll(row: HTMLElement, target: number): void {
+  const previous = activeScrollAnimations.get(row);
+  if (previous) cancelAnimationFrame(previous);
+
+  const start = row.scrollLeft;
+  const delta = target - start;
+  if (Math.abs(delta) < 1) return;
+
+  const duration = 420;
+  const startedAt = performance.now();
+  const easeOutCubic = (t: number): number => 1 - Math.pow(1 - t, 3);
+  const tick = (now: number): void => {
+    const progress = Math.min(1, (now - startedAt) / duration);
+    row.scrollLeft = start + delta * easeOutCubic(progress);
+    if (progress < 1) {
+      activeScrollAnimations.set(row, requestAnimationFrame(tick));
+      return;
+    }
+    activeScrollAnimations.delete(row);
+  };
+  activeScrollAnimations.set(row, requestAnimationFrame(tick));
 }
 
 export function updateCurrentHomeListSection(

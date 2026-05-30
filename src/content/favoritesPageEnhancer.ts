@@ -1,8 +1,8 @@
 /**
- * Inline favorite-removal on `/users/{userId}/favorites#!/places` (your
- * own page only). Decorates each game tile with a hover-revealed × button;
- * clicking it optimistically hides the tile, calls Roblox's toggle
- * endpoint, and shows a 5-second "Undo" toast that re-favorites if used.
+ * Inline tools on `/users/{userId}/favorites#!/places` (your
+ * own page gets remove; every page gets quick-add to folder). Decorates each game tile with hover tools;
+ * The folder button opens the shared folder menu; on your own page, the
+ * remove button optimistically hides the tile and shows a 5-second Undo toast.
  *
  * Tiles are reused by Roblox React on pagination, so the decoration tracks
  * the tile's current placeId in `data-bp-fav-decorated`. When the slot is
@@ -13,15 +13,25 @@
 
 import { getAuthenticatedUserId } from '@/api/users';
 import { getAllFavoriteGames, setGameFavorited } from '@/api/favorites';
+import { openFolderMenu } from './addToFolderMenu';
+import { getFolders, onFoldersChanged, FoldersState } from '@/storage/foldersStore';
 
 const DECORATED_ATTR = 'data-bp-fav-decorated';
 const STYLE_ID = 'bloxplus-favorites-page-style';
 const TOAST_ID = 'bloxplus-favorites-toast';
 
-/** placeId → universeId. Built once per render of the favorites page. */
-let placeToUniverse: Map<number, number> = new Map();
+interface FavoritePlaceEntry {
+  placeId: number;
+  universeId: number;
+  name?: string;
+}
+
+/** placeId -> game info. Built once per render of the favorites page. */
+let placeToGame: Map<number, FavoritePlaceEntry> = new Map();
 let mapBuiltForUserId: number | null = null;
-let removeButtonsInstalled = false;
+let pageToolsInstalled = false;
+let folderStateSubscribed = false;
+let latestFoldersState: FoldersState | null = null;
 let isOwnFavoritesPage = false;
 let runSeq = 0;
 const tileListeners = new WeakMap<HTMLElement, AbortController>();
@@ -45,16 +55,13 @@ export async function run(): Promise<void> {
   const me = await getAuthenticatedUserId();
   if (isStale(seq, path, userId)) return;
   isOwnFavoritesPage = me === userId;
-  if (!isOwnFavoritesPage) {
-    removeAllDecorations();
-    return;
-  }
 
   await ensureFavoritesMap(userId);
   if (isStale(seq, path, userId)) return;
   ensureStyle();
-  if (!removeButtonsInstalled) {
-    removeButtonsInstalled = true;
+  await ensureFolderStateSubscription();
+  if (!pageToolsInstalled) {
+    pageToolsInstalled = true;
     // Hide the toast if the user navigates away.
     window.addEventListener('beforeunload', dismissToast);
     // The hash route (`#!/places` vs `#!/badges` etc.) switches without
@@ -93,19 +100,22 @@ function readFavoritesPageUserId(): number | null {
 }
 
 async function ensureFavoritesMap(userId: number): Promise<void> {
-  if (mapBuiltForUserId === userId && placeToUniverse.size > 0) return;
+  if (mapBuiltForUserId === userId && placeToGame.size > 0) return;
+  if (mapBuiltForUserId !== userId) placeToGame = new Map();
   try {
     const games = await getAllFavoriteGames(userId);
-    const next = new Map<number, number>();
+    const next = new Map<number, FavoritePlaceEntry>();
     for (const g of games) {
       const pid = g.rootPlace?.id;
       if (typeof pid === 'number' && Number.isFinite(pid)) {
-        next.set(pid, g.id);
+        next.set(pid, { placeId: pid, universeId: g.id, name: g.name });
       }
     }
-    placeToUniverse = next;
+    placeToGame = next;
     mapBuiltForUserId = userId;
   } catch (e) {
+    placeToGame = new Map();
+    mapBuiltForUserId = userId;
     console.warn('[SviBlox] favorites map failed', e);
   }
 }
@@ -122,15 +132,19 @@ function decorate(): void {
       const tagged = tile.getAttribute(DECORATED_ATTR);
       if (placeId && tagged === String(placeId)) continue;
       tile.querySelector('.bp-fav-remove-btn')?.remove();
+      tile.querySelector('.bp-fav-folder-btn')?.remove();
       clearTileListeners(tile);
       tile.removeAttribute(DECORATED_ATTR);
     }
     const placeId = extractPlaceId(tile);
     if (!placeId) continue;
-    const universeId = placeToUniverse.get(placeId);
-    if (!universeId) continue;
+    const game = placeToGame.get(placeId);
+    if (!game) continue;
     tile.setAttribute(DECORATED_ATTR, String(placeId));
-    tile.appendChild(buildRemoveButton(tile, placeId, universeId));
+    tile.appendChild(buildFolderButton(tile, game));
+    if (isOwnFavoritesPage) {
+      tile.appendChild(buildRemoveButton(tile, placeId, game.universeId));
+    }
   }
 }
 
@@ -138,6 +152,7 @@ function removeAllDecorations(): void {
   for (const tile of document.querySelectorAll<HTMLElement>(`[${DECORATED_ATTR}]`)) {
     tile.removeAttribute(DECORATED_ATTR);
     tile.querySelector('.bp-fav-remove-btn')?.remove();
+    tile.querySelector('.bp-fav-folder-btn')?.remove();
     clearTileListeners(tile);
   }
 }
@@ -148,6 +163,60 @@ function extractPlaceId(tile: HTMLElement): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function extractTileName(tile: HTMLElement): string | undefined {
+  const candidates = ['.item-card-name', '.item-card-name-link', '.item-name', '[title]'];
+  for (const sel of candidates) {
+    const el = tile.querySelector<HTMLElement>(sel);
+    const text = el?.textContent?.trim() || el?.getAttribute('title')?.trim();
+    if (text) return text;
+  }
+  const text = tile.textContent?.trim().split(/\s{2,}|\n/)[0]?.trim();
+  return text || undefined;
+}
+
+function buildFolderButton(tile: HTMLElement, game: FavoritePlaceEntry): HTMLElement {
+  bindTileVisibility(tile);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'bp-fav-folder-btn';
+  btn.title = 'Add to folder';
+  btn.setAttribute('aria-label', 'Add to folder');
+  btn.innerHTML = FOLDER_ICON_HTML;
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void openFolderMenu({
+      anchor: btn,
+      game: {
+        universeId: game.universeId,
+        placeId: game.placeId,
+        name: game.name ?? extractTileName(tile),
+      },
+      onAdded: () => {
+        btn.classList.add('bp-in-folder');
+        flashFolderButton(btn);
+      },
+    });
+  });
+  syncFolderButtonState(btn, game.universeId, latestFoldersState);
+  return btn;
+}
+
+function bindTileVisibility(tile: HTMLElement): void {
+  if (tileListeners.has(tile)) return;
+  // CSS :hover isn't reliable on these Angular-rendered tiles (the inner
+  // anchor swallows pointer events in some states), so explicitly toggle
+  // the visible class on pointerenter / pointerleave at the tile level.
+  const show = () => tile.classList.add('bp-fav-tools-visible');
+  const hide = () => tile.classList.remove('bp-fav-tools-visible');
+  const controller = new AbortController();
+  tile.addEventListener('pointerenter', show, { signal: controller.signal });
+  tile.addEventListener('pointerleave', hide, { signal: controller.signal });
+  tile.addEventListener('focusin', show, { signal: controller.signal });
+  tile.addEventListener('focusout', hide, { signal: controller.signal });
+  tileListeners.set(tile, controller);
 }
 
 function buildRemoveButton(
@@ -166,24 +235,67 @@ function buildRemoveButton(
     e.stopPropagation();
     void handleRemove(tile, placeId, universeId, btn);
   });
-  // CSS :hover isn't reliable on these Angular-rendered tiles (the inner
-  // anchor swallows pointer events in some states), so explicitly toggle
-  // the visible class on pointerenter / pointerleave at the tile level.
-  const show = () => btn.classList.add('bp-fav-remove-btn-visible');
-  const hide = () => btn.classList.remove('bp-fav-remove-btn-visible');
-  const controller = new AbortController();
-  clearTileListeners(tile);
-  tile.addEventListener('pointerenter', show, { signal: controller.signal });
-  tile.addEventListener('pointerleave', hide, { signal: controller.signal });
-  tile.addEventListener('focusin', show, { signal: controller.signal });
-  tile.addEventListener('focusout', hide, { signal: controller.signal });
-  tileListeners.set(tile, controller);
   return btn;
 }
 
 function clearTileListeners(tile: HTMLElement): void {
   tileListeners.get(tile)?.abort();
   tileListeners.delete(tile);
+}
+
+const FOLDER_ICON_HTML = `
+  <svg class="bp-folder-icon-plus" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <circle cx="10" cy="10" r="8" />
+    <path d="M10 6 V14 M6 10 H14" stroke-linecap="round" />
+  </svg>
+  <svg class="bp-folder-icon-check" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <circle cx="10" cy="10" r="8" />
+    <path d="M6 10 l3 3 l5 -6" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+`;
+
+async function ensureFolderStateSubscription(): Promise<void> {
+  if (!latestFoldersState) {
+    latestFoldersState = await getFolders();
+  }
+  if (folderStateSubscribed) {
+    syncFolderButtons(latestFoldersState);
+    return;
+  }
+  folderStateSubscribed = true;
+  onFoldersChanged((state) => {
+    latestFoldersState = state;
+    syncFolderButtons(state);
+  });
+}
+
+function syncFolderButtons(state: FoldersState | null): void {
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('.bp-fav-folder-btn')) {
+    const tile = btn.closest<HTMLElement>(`[${DECORATED_ATTR}]`);
+    const placeId = tile ? extractPlaceId(tile) : null;
+    const game = placeId ? placeToGame.get(placeId) : null;
+    if (!game) continue;
+    syncFolderButtonState(btn, game.universeId, state);
+  }
+}
+
+function syncFolderButtonState(
+  btn: HTMLButtonElement,
+  universeId: number,
+  state: FoldersState | null
+): void {
+  const inFolder =
+    state?.folders.some((f) => f.games.some((g) => g.universeId === universeId)) ?? false;
+  btn.classList.toggle('bp-in-folder', inFolder);
+  btn.title = inFolder ? 'In folder' : 'Add to folder';
+  btn.setAttribute('aria-label', inFolder ? 'In folder' : 'Add to folder');
+}
+
+function flashFolderButton(btn: HTMLButtonElement): void {
+  btn.classList.add('bp-fav-folder-btn-added');
+  window.setTimeout(() => {
+    btn.classList.remove('bp-fav-folder-btn-added');
+  }, 900);
 }
 
 async function handleRemove(
@@ -208,7 +320,8 @@ async function handleRemove(
   }
 
   // Drop the placeId from our local map. If the user undoes, we re-add it.
-  placeToUniverse.delete(placeId);
+  const removedGame = placeToGame.get(placeId);
+  placeToGame.delete(placeId);
 
   showToast('Removed from favorites.', async () => {
     // Undo: explicitly re-favorite, then restore the tile + map entry.
@@ -218,7 +331,7 @@ async function handleRemove(
       showToast(`Undo failed: ${(e as Error).message}`, null);
       return;
     }
-    placeToUniverse.set(placeId, universeId);
+    placeToGame.set(placeId, removedGame ?? { placeId, universeId });
     tile.style.display = prevDisplay;
     btn.disabled = false;
     tile.setAttribute(DECORATED_ATTR, String(placeId));
@@ -274,10 +387,10 @@ function ensureStyle(): void {
     [${DECORATED_ATTR}] {
       position: relative;
     }
-    .bp-fav-remove-btn {
+    .bp-fav-remove-btn,
+    .bp-fav-folder-btn {
       position: absolute;
       top: 6px;
-      right: 6px;
       z-index: 12;
       width: 26px;
       height: 26px;
@@ -293,16 +406,41 @@ function ensureStyle(): void {
       transition: opacity 0.12s ease, transform 0.12s ease, background 0.12s ease;
       pointer-events: none;
     }
+    .bp-fav-remove-btn { right: 6px; }
+    .bp-fav-folder-btn {
+      left: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
     .bp-fav-remove-btn-visible,
+    .bp-fav-tools-visible .bp-fav-folder-btn,
+    .bp-fav-tools-visible .bp-fav-remove-btn,
+    [${DECORATED_ATTR}]:hover .bp-fav-folder-btn,
     [${DECORATED_ATTR}]:hover .bp-fav-remove-btn,
+    [${DECORATED_ATTR}]:focus-within .bp-fav-folder-btn,
     [${DECORATED_ATTR}]:focus-within .bp-fav-remove-btn {
       opacity: 1;
       transform: scale(1);
       pointer-events: auto;
     }
+    .bp-fav-folder-btn.bp-in-folder {
+      opacity: 1;
+      transform: scale(1);
+      pointer-events: auto;
+      background: rgba(46,178,76,0.85);
+      border-color: rgba(255,255,255,0.35);
+    }
     .bp-fav-remove-btn:hover:not(:disabled) {
       background: #d9534f;
     }
+    .bp-fav-folder-btn:hover:not(:disabled),
+    .bp-fav-folder-btn-added {
+      background: rgba(74,144,226,0.85);
+    }
+    .bp-fav-folder-btn .bp-folder-icon-check { display: none; }
+    .bp-fav-folder-btn.bp-in-folder .bp-folder-icon-plus { display: none; }
+    .bp-fav-folder-btn.bp-in-folder .bp-folder-icon-check { display: inline-block; }
     .bp-fav-remove-btn:disabled {
       opacity: 0.4;
       cursor: progress;
