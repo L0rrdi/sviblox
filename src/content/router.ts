@@ -18,6 +18,7 @@ import * as friendLastOnlineEnhancer from './friendLastOnlineEnhancer';
 import * as terminatedProfileEnhancer from './terminatedProfileEnhancer';
 import * as badgeDetailEnhancer from './badgeDetailEnhancer';
 import * as itemBundleEnhancer from './itemBundleEnhancer';
+import * as catalogSourceDownloadEnhancer from './catalogSourceDownloadEnhancer';
 import * as serverFiltersEnhancer from './serverFiltersEnhancer';
 import * as quickPlayEnhancer from './quickPlayEnhancer';
 import * as accountValueEnhancer from './accountValueEnhancer';
@@ -35,10 +36,12 @@ import { install as installBannedProfileTrap } from './bannedProfileTrap';
 themesPage.install();
 uhblPage.install();
 customizeMode.install();
+customizeMenuEntry.install();
 // Always-on click listener that stashes any clicked /users/{id}/profile
 // userId so terminatedProfileEnhancer can recover it after Roblox redirects
 // a banned profile to /request-error. Idempotent.
 installBannedProfileTrap();
+installRoProStorageReader();
 
 function dispatch(): void {
   void homeEnhancer.run();
@@ -63,6 +66,7 @@ function dispatch(): void {
   mutualsEnhancer.run();
   void badgeDetailEnhancer.run();
   void itemBundleEnhancer.run();
+  void catalogSourceDownloadEnhancer.run();
   serverFiltersEnhancer.run();
   quickPlayEnhancer.run();
   // Always-on enhancers.
@@ -87,3 +91,95 @@ chrome.storage.onChanged.addListener((changes, area) => {
     dispatch();
   }
 });
+
+function installRoProStorageReader(): void {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type !== 'bp-read-ropro-local-storage') return false;
+    sendResponse({
+      ok: true,
+      url: location.href,
+      records: readRoProStorageRecords(),
+    });
+    return false;
+  });
+}
+
+function readRoProStorageRecords(): Array<{
+  area: 'localStorage' | 'sessionStorage' | 'pageDom';
+  key: string;
+  value: string;
+}> {
+  return [
+    ...readStorageArea('localStorage', localStorage),
+    ...readStorageArea('sessionStorage', sessionStorage),
+    ...readRoProDomRecords(),
+  ];
+}
+
+function readStorageArea(
+  area: 'localStorage' | 'sessionStorage',
+  storage: Storage
+): Array<{ area: 'localStorage' | 'sessionStorage'; key: string; value: string }> {
+  const rows: Array<{ area: 'localStorage' | 'sessionStorage'; key: string; value: string }> = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (!key || !isLikelyRoProPlaytimeKey(key)) continue;
+    const value = storage.getItem(key);
+    if (value) rows.push({ area, key, value });
+  }
+  return rows;
+}
+
+function isLikelyRoProPlaytimeKey(key: string): boolean {
+  return /ropro|most.?played|play.?time|time.?played/i.test(key);
+}
+
+function readRoProDomRecords(): Array<{ area: 'pageDom'; key: string; value: string }> {
+  const rows = [...document.querySelectorAll<HTMLElement>('#mostPlayedContainer li.game-card')];
+  const games = rows
+    .map(readRoProDomGame)
+    .filter((game): game is { placeId: number; gameName?: string; minutes: number } => game !== null);
+
+  return games.length
+    ? [{ area: 'pageDom', key: 'roproVisibleMostPlayed', value: JSON.stringify(games) }]
+    : [];
+}
+
+function readRoProDomGame(
+  tile: HTMLElement
+): { placeId: number; gameName?: string; minutes: number } | null {
+  const link = tile.querySelector<HTMLAnchorElement>('a.game-card-link[href*="/games/"]');
+  const placeId = parsePositiveInt(link?.id) ?? parsePositiveInt(link?.href.match(/\/games\/(\d+)/)?.[1]);
+  if (!placeId) return null;
+
+  const timeText =
+    tile.querySelector<HTMLElement>('[title^="Played for"]')?.getAttribute('title') ??
+    tile.querySelector<HTMLElement>('.vote-percentage-label')?.textContent ??
+    '';
+  const minutes = readRoProMinutes(timeText);
+  if (!minutes) return null;
+
+  const gameName =
+    tile.getAttribute('title')?.trim() ||
+    tile.querySelector<HTMLElement>('.game-card-name, .game-name-title')?.textContent?.trim() ||
+    undefined;
+
+  return { placeId, gameName, minutes };
+}
+
+function readRoProMinutes(text: string): number | null {
+  const normalized = text.replace(/,/g, '').toLowerCase();
+  const explicitMinutes = normalized.match(/(\d+(?:\.\d+)?)\s*minutes?/);
+  if (explicitMinutes) return Math.round(Number(explicitMinutes[1]));
+
+  const hours = normalized.match(/(\d+(?:\.\d+)?)\s*hours?/);
+  if (hours) return Math.round(Number(hours[1]) * 60);
+
+  const bare = normalized.match(/(\d+(?:\.\d+)?)/);
+  return bare ? Math.round(Number(bare[1])) : null;
+}
+
+function parsePositiveInt(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}

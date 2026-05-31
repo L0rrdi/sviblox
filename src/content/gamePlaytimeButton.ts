@@ -15,7 +15,7 @@
  */
 
 import { getSettings } from '@/storage/settingsStore';
-import { getPlaytime } from '@/storage/playtimeStore';
+import { getPlaytime, hasPlaytimeStorageChange } from '@/storage/playtimeStore';
 import { placeIdToUniverseId } from '@/api/games';
 import { GamePlaytimeEntry } from '@/types';
 
@@ -94,7 +94,7 @@ export async function run(): Promise<void> {
   if (!subscribed) {
     subscribed = true;
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== 'local' || !changes['bloxplus.playtime']) return;
+      if (area !== 'local' || !hasPlaytimeStorageChange(changes)) return;
       const live = document.querySelector<HTMLButtonElement>(`#${BUTTON_ID} .bp-playtime-btn`);
       const currentPlace = readPlaceId();
       if (live && currentPlace) void hydrate(live, currentPlace);

@@ -1,7 +1,7 @@
 import { getGameInfo, getGameVotes, GameInfo, GameVote } from '@/api/games';
 import { getFavoriteGames, FavoriteGame } from '@/api/favorites';
 import { getGameIcons } from '@/api/thumbnails';
-import { getAuthenticatedUserId } from '@/api/users';
+import { getAuthenticatedUserIdFresh } from '@/api/users';
 import { inAnyFolder } from '../folderTileDecorator';
 import { escapeHtml } from '@/util/html';
 
@@ -193,11 +193,16 @@ export function ensureFavoritesStyle(): void {
   document.head.appendChild(style);
 }
 
-// One-shot per page load. Any failure that completes the first call also
-// counts — the MutationObserver would otherwise retry on every tick and
-// hammer the API after a 4xx. The user can refresh the page to retry.
-let favoritesLoaded = false;
-let favoritesSnapshot: HomeListSnapshot | null = null;
+// One-shot per signed-in Roblox user. The home MutationObserver calls
+// ensureFavoritesSection() often, so failures are cached for that account; a
+// real account switch gets a different key and reloads from that user's
+// favorites instead of showing stale tiles from the previous account.
+const SIGNED_OUT_FAVORITES_KEY = 'signed-out';
+const FAVORITES_USER_CHECK_MS = 15_000;
+let favoritesUserKey: string | null = null;
+let favoritesUserCheckedAt = 0;
+let favoritesUserCheckInFlight: Promise<void> | null = null;
+const favoritesSnapshots = new Map<string, HomeListSnapshot>();
 
 export interface HomeListSnapshot {
   metaText: string;
@@ -399,28 +404,66 @@ export function ensureFavoritesSection(): HTMLElement {
 
   ensureHomeListScroller(section);
 
-  if (favoritesSnapshot) applyHomeListSnapshot(section, favoritesSnapshot);
-
-  if (!favoritesLoaded) {
-    favoritesLoaded = true; // hard one-shot, no retries even on error
-    void loadFavorites(section);
+  if (favoritesUserKey) {
+    const snapshot = favoritesSnapshots.get(favoritesUserKey);
+    if (snapshot) applyHomeListSnapshot(section, snapshot);
   }
+
+  void ensureFavoritesForCurrentUser(section);
 
   return section;
 }
 
-async function loadFavorites(section: HTMLElement): Promise<void> {
+async function ensureFavoritesForCurrentUser(section: HTMLElement): Promise<void> {
+  if (
+    favoritesUserCheckInFlight ||
+    (favoritesUserKey && Date.now() - favoritesUserCheckedAt < FAVORITES_USER_CHECK_MS)
+  ) {
+    return favoritesUserCheckInFlight ?? undefined;
+  }
+
+  favoritesUserCheckInFlight = (async () => {
+    const userId = await getAuthenticatedUserIdFresh();
+    favoritesUserCheckedAt = Date.now();
+    const nextKey = userId ? String(userId) : SIGNED_OUT_FAVORITES_KEY;
+    if (nextKey === favoritesUserKey && favoritesSnapshots.has(nextKey)) return;
+
+    favoritesUserKey = nextKey;
+    const cached = favoritesSnapshots.get(nextKey);
+    if (cached) {
+      updateCurrentHomeListSection(FAVORITES_SECTION_ID, cached, section);
+      return;
+    }
+
+    const loadingSnapshot: HomeListSnapshot = {
+      metaText: 'SviBlox',
+      rowHtml: '<li class="bp-fav-empty">Loading favorites...</li>',
+      seeAllHref: userId ? favoritesSeeAllUrl(userId) : null,
+    };
+    updateCurrentHomeListSection(FAVORITES_SECTION_ID, loadingSnapshot, section);
+    await loadFavoritesForUser(section, userId, nextKey);
+  })().finally(() => {
+    favoritesUserCheckInFlight = null;
+  });
+  return favoritesUserCheckInFlight;
+}
+
+async function loadFavoritesForUser(
+  section: HTMLElement,
+  userId: number | null,
+  userKey: string
+): Promise<void> {
   const rowEl = section.querySelector('.bp-fav-row') as HTMLElement;
   const metaEl = section.querySelector('.bp-fav-meta') as HTMLElement;
 
-  const userId = await getAuthenticatedUserId();
   if (!userId) {
-    favoritesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-error">Sign in to view favorites.</li>`,
       seeAllHref: null,
     };
-    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    favoritesSnapshots.set(userKey, snapshot);
+    updateCurrentFavoritesSection(userKey, snapshot, section);
     return;
   }
   const seeAllHref = favoritesSeeAllUrl(userId);
@@ -432,22 +475,24 @@ async function loadFavorites(section: HTMLElement): Promise<void> {
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
     console.error('[SviBlox] favorites fetch failed:', e);
-    favoritesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-error">Failed to load favorites: ${escapeHtml(msg)}</li>`,
       seeAllHref,
     };
-    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    favoritesSnapshots.set(userKey, snapshot);
+    updateCurrentFavoritesSection(userKey, snapshot, section);
     return;
   }
 
   if (!games.length) {
-    favoritesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-empty">No favorite games yet.</li>`,
       seeAllHref,
     };
-    updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+    favoritesSnapshots.set(userKey, snapshot);
+    updateCurrentFavoritesSection(userKey, snapshot, section);
     return;
   }
 
@@ -463,14 +508,24 @@ async function loadFavorites(section: HTMLElement): Promise<void> {
     getGameVotes(universeIds),
   ]);
 
-  favoritesSnapshot = {
+  const snapshot = {
     metaText: `SviBlox · ${games.length} game${games.length === 1 ? '' : 's'}`,
     seeAllHref,
     rowHtml: games
       .map((g) => favTile(g, icons.get(g.id), info.get(g.id), votes.get(g.id)))
       .join(''),
   };
-  updateCurrentHomeListSection(FAVORITES_SECTION_ID, favoritesSnapshot, section);
+  favoritesSnapshots.set(userKey, snapshot);
+  updateCurrentFavoritesSection(userKey, snapshot, section);
+}
+
+function updateCurrentFavoritesSection(
+  userKey: string,
+  snapshot: HomeListSnapshot,
+  section: HTMLElement
+): void {
+  if (favoritesUserKey !== userKey) return;
+  updateCurrentHomeListSection(FAVORITES_SECTION_ID, snapshot, section);
 }
 
 /**

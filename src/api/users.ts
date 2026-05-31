@@ -13,6 +13,20 @@ export async function getAuthenticatedUserId(): Promise<number | null> {
   }
 }
 
+export async function getAuthenticatedUserIdFresh(): Promise<number | null> {
+  try {
+    const response = await fetch('https://users.roblox.com/v1/users/authenticated', {
+      credentials: 'include',
+      cache: 'no-store',
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { id?: number };
+    return typeof data.id === 'number' ? data.id : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface RobloxUser {
   id: number;
   name: string;

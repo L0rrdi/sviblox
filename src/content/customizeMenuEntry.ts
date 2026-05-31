@@ -11,12 +11,40 @@
  */
 
 import { getSettings } from '@/storage/settingsStore';
+import { openCustomizeMode } from './customizeMode';
 
 const ITEM_ID = 'bloxplus-settings-menu-customize';
 const MENU_ID = 'settings-popover-menu';
 
+let installed = false;
+let pendingRun = false;
+
+export function install(): void {
+  if (installed) return;
+  installed = true;
+  new MutationObserver(() => {
+    if (document.getElementById(MENU_ID) || document.getElementById(ITEM_ID)) scheduleRun();
+  }).observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('click', (e) => {
+    const target = e.target;
+    if (!(target instanceof Element)) return;
+    if (!target.closest('#settings-icon, #navbar-settings')) return;
+    scheduleRun();
+    window.setTimeout(scheduleRun, 50);
+  }, true);
+}
+
 export function run(): void {
   void runAsync();
+}
+
+function scheduleRun(): void {
+  if (pendingRun) return;
+  pendingRun = true;
+  requestAnimationFrame(() => {
+    pendingRun = false;
+    void runAsync();
+  });
 }
 
 async function runAsync(): Promise<void> {
@@ -42,7 +70,7 @@ async function runAsync(): Promise<void> {
   a.textContent = 'Customize';
   a.addEventListener('click', (e) => {
     e.preventDefault();
-    location.hash = 'bloxplus-customize';
+    openCustomizeMode();
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     // Close the dropdown by toggling the native settings-icon button. The
     // native items close via href navigation; we don't navigate, so we drive

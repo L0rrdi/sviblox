@@ -35,11 +35,18 @@ export function parseRoProJson(raw: string, legacyUnit: RoProUnit = 'minutes'): 
     throw new Error('Invalid JSON');
   }
 
+  const previews: ImportPreview[] = [];
   const mostPlayed = findMostPlayedCache(parsed);
-  if (mostPlayed) return parseMostPlayedCache(mostPlayed, warnings);
+  if (mostPlayed) previews.push(parseMostPlayedCache(mostPlayed, warnings));
 
   const timePlayed = findTimePlayedMap(parsed);
-  if (timePlayed) return parseTimePlayedMap(timePlayed, legacyUnit, warnings);
+  if (timePlayed) previews.push(parseTimePlayedMap(timePlayed, legacyUnit, warnings));
+
+  if (previews.length) {
+    const entries = mergeImportedEntries(previews.flatMap((preview) => preview.entries));
+    applyMostRecentServers(entries, findMostRecentServers(parsed), warnings);
+    return { entries, totalSeconds: sum(entries), warnings };
+  }
 
   if (Array.isArray(parsed) && looksLikeSviBloxEntries(parsed)) {
     const entries = (parsed as GamePlaytimeEntry[]).map(normalizeImportedEntry).filter(Boolean) as GamePlaytimeEntry[];
@@ -105,7 +112,12 @@ function findMostPlayedCache(v: unknown): MostPlayedCache | null {
   const obj = v as Record<string, unknown>;
   if (isMostPlayedCache(obj)) return obj;
   const nested = obj.mostPlayedUniverseCache;
-  return isMostPlayedCache(nested) ? nested : null;
+  if (isMostPlayedCache(nested)) return nested;
+  for (const key of ['local', 'sync', '__roproLocal', '__roproSync']) {
+    const found = findMostPlayedCache(obj[key]);
+    if (found) return found;
+  }
+  return null;
 }
 
 function isMostPlayedCache(v: unknown): v is MostPlayedCache {
@@ -152,7 +164,10 @@ function parseMostPlayedCache(v: MostPlayedCache, warnings: string[]): ImportPre
           },
         } satisfies GamePlaytimeEntry);
 
-      entry.windowSeconds = { ...(entry.windowSeconds ?? {}), [winKey]: seconds };
+      entry.windowSeconds = { ...(entry.windowSeconds ?? {}) };
+      for (const key of roProWindowAliases(winKey)) {
+        entry.windowSeconds[key] = Math.max(entry.windowSeconds[key] ?? 0, seconds);
+      }
       if (seconds > entry.importedSeconds) {
         entry.importedSeconds = seconds;
         entry.totalSeconds = seconds + (entry.trackedSeconds ?? 0);
@@ -175,6 +190,10 @@ function findTimePlayedMap(v: unknown): Record<string, unknown> | null {
   if ('timePlayed' in obj && isPlainObject(obj.timePlayed)) {
     return obj.timePlayed as Record<string, unknown>;
   }
+  for (const key of ['local', 'sync', '__roproLocal', '__roproSync']) {
+    const found = findTimePlayedMap(obj[key]);
+    if (found) return found;
+  }
   return looksLikeTimePlayedMap(obj) ? obj : null;
 }
 
@@ -184,11 +203,12 @@ function parseTimePlayedMap(
   warnings: string[]
 ): ImportPreview {
   warnings.push(
-    'Imported legacy timePlayed data. This RoPro key appears to be visit/session counts, not verified playtime; use mostPlayedUniverseCache when available.'
+    'Imported supplemental timePlayed data. RoPro appears to store only pending minute chunks there, so mostPlayedUniverseCache remains the more reliable total when both exist.'
   );
   const importedAt = new Date().toISOString();
   const factor = UNIT_TO_SECONDS[unit];
   const entries: GamePlaytimeEntry[] = [];
+  let skippedNonPositive = 0;
 
   for (const [id, val] of Object.entries(v)) {
     const t = readTuple(val);
@@ -199,7 +219,7 @@ function parseTimePlayedMap(
     }
     const seconds = Math.round(t.time * factor);
     if (!Number.isFinite(seconds) || seconds <= 0) {
-      warnings.push(`Skipped key "${id}" - non-positive playtime.`);
+      skippedNonPositive += 1;
       continue;
     }
     entries.push({
@@ -216,7 +236,138 @@ function parseTimePlayedMap(
       },
     });
   }
+  if (skippedNonPositive) {
+    warnings.push(`Skipped ${skippedNonPositive} timePlayed entr${skippedNonPositive === 1 ? 'y' : 'ies'} with zero or negative minutes.`);
+  }
   return { entries, totalSeconds: sum(entries), warnings };
+}
+
+type MostRecentServerRow = [unknown, unknown, unknown, unknown, ...unknown[]];
+
+function findMostRecentServers(v: unknown): Record<string, MostRecentServerRow> | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const obj = v as Record<string, unknown>;
+  if (isMostRecentServersMap(obj.mostRecentServers)) {
+    return obj.mostRecentServers as Record<string, MostRecentServerRow>;
+  }
+  if (isMostRecentServersMap(obj)) return obj as Record<string, MostRecentServerRow>;
+  for (const key of ['local', 'sync', '__roproLocal', '__roproSync']) {
+    const found = findMostRecentServers(obj[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isMostRecentServersMap(v: unknown): v is Record<string, MostRecentServerRow> {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  return Object.entries(v as Record<string, unknown>).some(
+    ([key, value]) =>
+      /^\d+$/.test(key) &&
+      Array.isArray(value) &&
+      value.length >= 4 &&
+      Number.isFinite(Number(value[0])) &&
+      Number.isFinite(Number(value[3]))
+  );
+}
+
+function applyMostRecentServers(
+  entries: GamePlaytimeEntry[],
+  servers: Record<string, MostRecentServerRow> | null,
+  warnings: string[]
+): void {
+  if (!servers) return;
+  let hydrated = 0;
+  for (const entry of entries) {
+    if (!entry.universeId) continue;
+    const row = servers[String(entry.universeId)];
+    if (!Array.isArray(row)) continue;
+    const placeId = Number(row[0]);
+    const lastPlayedMs = Number(row[3]);
+    let changed = false;
+    if (Number.isFinite(placeId) && placeId > 0 && !entry.placeId) {
+      entry.placeId = Math.floor(placeId);
+      changed = true;
+    }
+    if (Number.isFinite(lastPlayedMs) && lastPlayedMs > 0) {
+      const iso = new Date(lastPlayedMs).toISOString();
+      if (!entry.lastPlayedAt || iso > entry.lastPlayedAt) {
+        entry.lastPlayedAt = iso;
+        changed = true;
+      }
+    }
+    if (changed) hydrated += 1;
+  }
+  if (hydrated) {
+    warnings.push(`Added place/last-played metadata from mostRecentServers for ${hydrated} entr${hydrated === 1 ? 'y' : 'ies'}.`);
+  }
+}
+
+function mergeImportedEntries(entries: GamePlaytimeEntry[]): GamePlaytimeEntry[] {
+  const byUniverse = new Map<number, GamePlaytimeEntry>();
+  const passthrough: GamePlaytimeEntry[] = [];
+  for (const entry of entries) {
+    if (typeof entry.universeId !== 'number') {
+      passthrough.push(entry);
+      continue;
+    }
+    const current = byUniverse.get(entry.universeId);
+    if (!current) {
+      byUniverse.set(entry.universeId, {
+        ...entry,
+        sources: [...(entry.sources ?? [])],
+        importMetadata: entry.importMetadata
+          ? { ...entry.importMetadata, originalKeys: [...(entry.importMetadata.originalKeys ?? [])] }
+          : undefined,
+      });
+      continue;
+    }
+
+    const importedSeconds = Math.max(current.importedSeconds ?? 0, entry.importedSeconds ?? 0);
+    const trackedSeconds = Math.max(current.trackedSeconds ?? 0, entry.trackedSeconds ?? 0);
+    byUniverse.set(entry.universeId, {
+      ...current,
+      ...entry,
+      gameName: current.gameName ?? entry.gameName,
+      placeId: current.placeId ?? entry.placeId,
+      importedSeconds,
+      trackedSeconds,
+      totalSeconds: importedSeconds + trackedSeconds,
+      lastPlayedAt: latestIso(current.lastPlayedAt, entry.lastPlayedAt),
+      windowSeconds: mergeWindowSeconds(current.windowSeconds, entry.windowSeconds),
+      sources: [...new Set([...(current.sources ?? []), ...(entry.sources ?? [])])],
+      importMetadata: {
+        importedAt: latestIso(current.importMetadata?.importedAt, entry.importMetadata?.importedAt) ?? new Date().toISOString(),
+        sourceName: [...new Set([current.importMetadata?.sourceName, entry.importMetadata?.sourceName].filter(Boolean))].join('+'),
+        originalKeys: [
+          ...(current.importMetadata?.originalKeys ?? []),
+          ...(entry.importMetadata?.originalKeys ?? []),
+        ],
+      },
+    });
+  }
+  return [...byUniverse.values(), ...passthrough].sort((a, b) => b.totalSeconds - a.totalSeconds);
+}
+
+function roProWindowAliases(key: string): string[] {
+  if (key === '999') return ['999', '365', 'all'];
+  return [key];
+}
+
+function mergeWindowSeconds(
+  current: Record<string, number> | undefined,
+  next: Record<string, number> | undefined
+): Record<string, number> | undefined {
+  const out: Record<string, number> = { ...(current ?? {}) };
+  for (const [key, seconds] of Object.entries(next ?? {})) {
+    out[key] = Math.max(out[key] ?? 0, seconds);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function latestIso(a?: string, b?: string): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return b > a ? b : a;
 }
 
 function readTuple(v: unknown): { time: number; lastPlayedMs?: number } | null {

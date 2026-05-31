@@ -14,6 +14,15 @@ export interface GamePlaytimeEntry {
    * Keyed by window label, e.g. "30", "999", "all".
    */
   windowSeconds?: Record<string, number>;
+  /**
+   * Rolling buckets for SviBlox-tracked time. Hour buckets power the
+   * 24-hour view; day buckets power 7/30/365-day views without storing one
+   * sample per minute.
+   */
+  trackingBuckets?: {
+    hours?: Record<string, number>;
+    days?: Record<string, number>;
+  };
   sources: PlaytimeSource[];
   importMetadata?: {
     importedAt: string;

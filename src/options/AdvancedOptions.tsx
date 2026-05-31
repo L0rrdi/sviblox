@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getGameInfo } from '@/api/games';
-import { getPlaytime, setPlaytime } from '@/storage/playtimeStore';
+import { getGameInfo, placeIdToUniverseId } from '@/api/games';
+import {
+  addTrackingBucketSample,
+  getActivePlaytimeUserId,
+  getPlaytime,
+  hasPlaytimeStorageChange,
+  PLAYTIME_BY_USER_KEY,
+  PLAYTIME_KEY,
+  setPlaytime,
+} from '@/storage/playtimeStore';
 import { getSettings, setSettings } from '@/storage/settingsStore';
 import { getDefaultThemeSchedule } from '@/storage/themeSchedule';
+import { mergePlaytime } from '@/playtime/normalizePlaytime';
+import { parseRoProJson } from '@/playtime/importRoPro';
 import { GamePlaytimeEntry } from '@/types';
 
 const BACKUP_LOCAL_KEYS = [
@@ -15,7 +25,7 @@ const BACKUP_LOCAL_KEYS = [
 ] as const;
 
 const BACKUP_SYNC_KEYS = ['bloxplus.settings'] as const;
-const PLAYTIME_BACKUP_KEY = 'bloxplus.playtime';
+const PLAYTIME_BACKUP_KEY = PLAYTIME_KEY;
 const LAST_PRE_IMPORT_BACKUP_KEY = 'bloxplus.lastPreImportBackup'; // legacy single-slot; migrated lazily
 const PRE_IMPORT_BACKUPS_KEY = 'bloxplus.preImportBackups';
 const PRE_IMPORT_BACKUP_MAX = 3;
@@ -43,6 +53,37 @@ interface PendingImport {
 }
 
 type SortMode = 'time-desc' | 'name' | 'recent';
+
+const ROPRO_EXPORT_SCRIPT = `(async () => {
+  const begin = '---SVIBLOX-ROPRO-PLAYTIME-EXPORT-BEGIN---';
+  const end = '---SVIBLOX-ROPRO-PLAYTIME-EXPORT-END---';
+  const read = (area) => new Promise((resolve) => chrome.storage[area].get(null, resolve));
+  const [local, sync] = await Promise.all([read('local'), read('sync')]);
+  const payload = {
+    ...(local || {}),
+    __svibloxRoProExport: {
+      source: 'RoPro',
+      exportedAt: new Date().toISOString(),
+      localKeys: Object.keys(local || {}),
+      syncKeys: Object.keys(sync || {}),
+    },
+    __roproSync: sync || {},
+  };
+  const text = begin + '\\n' + JSON.stringify(payload, null, 2) + '\\n' + end;
+  let copied = false;
+  try {
+    if (typeof copy === 'function') {
+      copy(text);
+      copied = true;
+    } else if (globalThis.navigator?.clipboard?.writeText) {
+      await globalThis.navigator.clipboard.writeText(text);
+      copied = true;
+    }
+  } catch {}
+  console.log(copied ? 'SviBlox RoPro export copied.' : 'SviBlox RoPro export printed below. Copy everything between the markers.');
+  console.log(text);
+  return text;
+})();`;
 
 export function AdvancedOptions() {
   const scrollToSection = (id: string): void => {
@@ -195,7 +236,7 @@ function DataBackups() {
 
         <div className="adv-tool">
           <h3>Playtime backup</h3>
-          <p>Only game playtime stats from <code>bloxplus.playtime</code>.</p>
+          <p>Only game playtime stats for the current Roblox account.</p>
           <div className="adv-actions">
             <button onClick={() => void exportPlaytime()}>Export playtime</button>
             <button onClick={() => playtimeFileRef.current?.click()}>Preview import</button>
@@ -278,7 +319,9 @@ const LOCAL_KEY_LABELS: Record<string, string> = {
   'bloxplus.profileAnnotations': 'Profile notes & nicknames',
   'bloxplus.customTheme': 'Custom theme (legacy slot)',
   'bloxplus.userThemes': 'Theme presets (incl. images)',
-  'bloxplus.playtime': 'Playtime entries',
+  [PLAYTIME_KEY]: 'Playtime entries (legacy)',
+  [PLAYTIME_BY_USER_KEY]: 'Playtime entries by Roblox account',
+  'bloxplus.playtime.meta': 'Playtime migration metadata',
   'bloxplus.uhbl.sheet': 'UHBL sheet snapshot',
   'bloxplus.uhbl.mediaMap': 'UHBL video URL map (accumulated across refreshes)',
   'bloxplus.uhbl.mediaMeta': 'UHBL media-fetch metadata',
@@ -670,6 +713,7 @@ function approxJsonBytes(value: unknown): number {
 
 function PlaytimeManager() {
   const [entries, setEntries] = useState<GamePlaytimeEntry[]>([]);
+  const [accountId, setAccountId] = useState<number | null>(null);
   const [hydratedNames, setHydratedNames] = useState<Map<number, string>>(new Map());
   const [selectedKey, setSelectedKey] = useState('');
   const [query, setQuery] = useState('');
@@ -679,9 +723,12 @@ function PlaytimeManager() {
   const [trackedMinutes, setTrackedMinutes] = useState(0);
   const [addHours, setAddHours] = useState('');
   const [addMinutes, setAddMinutes] = useState('');
+  const [importingRoProJson, setImportingRoProJson] = useState(false);
+  const [roProJson, setRoProJson] = useState('');
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const reload = async (): Promise<void> => {
+    setAccountId(await getActivePlaytimeUserId());
     const next = await getPlaytime();
     setEntries(next);
     if (!selectedKey && next[0]) setSelectedKey(playtimeEntryKey(next[0], 0));
@@ -690,7 +737,7 @@ function PlaytimeManager() {
   useEffect(() => {
     void reload();
     const onChange = (changes: Record<string, chrome.storage.StorageChange>, area: string): void => {
-      if (area === 'local' && changes[PLAYTIME_BACKUP_KEY]) void reload();
+      if (area === 'local' && hasPlaytimeStorageChange(changes)) void reload();
     };
     chrome.storage.onChanged.addListener(onChange);
     return () => chrome.storage.onChanged.removeListener(onChange);
@@ -760,6 +807,44 @@ function PlaytimeManager() {
     setStatus({ kind: 'ok', text: message });
   };
 
+  const copyRoProExportScript = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(ROPRO_EXPORT_SCRIPT);
+      setStatus({
+        kind: 'ok',
+        text: 'RoPro export script copied. Paste it in RoPro service worker console, then paste the exported JSON here.',
+      });
+    } catch (err) {
+      setStatus({ kind: 'err', text: `Could not copy export script: ${(err as Error).message}` });
+    }
+  };
+
+  const importRoProJson = async (): Promise<void> => {
+    if (importingRoProJson) return;
+    setImportingRoProJson(true);
+    try {
+      const parsed = parseRoProJson(roProJson);
+      const parsedEntries = await hydrateRoProPlaceEntries(parsed.entries);
+      if (!parsedEntries.length) throw new Error('No importable playtime entries were found.');
+
+      await savePreImportBackup('playtime', await buildPlaytimeBackup());
+      const current = await getPlaytime();
+      const next = mergePlaytime(current, parsedEntries);
+      await setPlaytime(next);
+      setEntries(next);
+      setRoProJson('');
+      const warningText = formatRoProWarnings(parsed.warnings);
+      setStatus({
+        kind: 'ok',
+        text: `Imported ${parsedEntries.length} RoPro entr${parsedEntries.length === 1 ? 'y' : 'ies'} from pasted JSON. Existing games were updated, not duplicated.${warningText}`,
+      });
+    } catch (err) {
+      setStatus({ kind: 'err', text: `RoPro JSON import failed: ${(err as Error).message}` });
+    } finally {
+      setImportingRoProJson(false);
+    }
+  };
+
   const updateSelected = async (patcher: (entry: GamePlaytimeEntry) => GamePlaytimeEntry): Promise<void> => {
     if (!selected) return;
     const next = entries.map((entry, index) => index === selected.index ? patcher(entry) : entry);
@@ -775,6 +860,10 @@ function PlaytimeManager() {
       importedSeconds,
       trackedSeconds,
       totalSeconds: importedSeconds + trackedSeconds,
+      trackingBuckets:
+        trackedSeconds === Math.max(0, Math.round(entry.trackedSeconds ?? 0))
+          ? entry.trackingBuckets
+          : undefined,
       sources: normalizedPlaytimeSources(entry, importedSeconds, trackedSeconds),
     }));
   };
@@ -787,8 +876,9 @@ function PlaytimeManager() {
     }
     await updateSelected((entry) => {
       const trackedSeconds = Math.max(0, (entry.trackedSeconds ?? 0) + seconds);
+      const withBucket = addTrackingBucketSample(entry, seconds);
       return {
-        ...entry,
+        ...withBucket,
         trackedSeconds,
         totalSeconds: Math.max(0, entry.importedSeconds ?? 0) + trackedSeconds,
         lastPlayedAt: new Date().toISOString(),
@@ -811,6 +901,7 @@ function PlaytimeManager() {
       trackedSeconds: 0,
       totalSeconds: 0,
       windowSeconds: undefined,
+      trackingBuckets: undefined,
       sources: [],
     }));
   };
@@ -836,7 +927,10 @@ function PlaytimeManager() {
       <div className="adv-card-head">
         <div>
           <h2>Playtime manager</h2>
-          <p>{entries.length} games, {formatDuration(totalSeconds)} total.</p>
+          <p>
+            {entries.length} games, {formatDuration(totalSeconds)} total
+            {accountId ? ` for Roblox user ${accountId}.` : ' for the current Roblox account.'}
+          </p>
         </div>
       </div>
 
@@ -895,6 +989,34 @@ function PlaytimeManager() {
         </div>
       )}
       {status && <div className={`adv-status adv-status-${status.kind}`}>{status.text}</div>}
+
+      <div className="adv-ropro-export">
+        <div>
+          <h3>RoPro storage export</h3>
+          <p>
+            Chrome blocks direct reads from RoPro's private extension storage. This helper copies an
+            export script for RoPro's service worker console, then imports the JSON it prints.
+          </p>
+        </div>
+        <div className="adv-actions">
+          <button onClick={() => void copyRoProExportScript()}>Copy export script</button>
+        </div>
+        <textarea
+          className="adv-ropro-json"
+          value={roProJson}
+          onChange={(e) => setRoProJson(e.target.value)}
+          placeholder="Paste RoPro export JSON here"
+          spellCheck={false}
+        />
+        <div className="adv-actions">
+          <button
+            onClick={() => void importRoProJson()}
+            disabled={importingRoProJson || !roProJson.trim()}
+          >
+            {importingRoProJson ? 'Importing...' : 'Import pasted RoPro JSON'}
+          </button>
+        </div>
+      </div>
     </section>
   );
 }
@@ -912,12 +1034,12 @@ async function buildBackup(): Promise<BackupFile> {
 }
 
 async function buildPlaytimeBackup(): Promise<BackupFile> {
-  const localAll = await chrome.storage.local.get([PLAYTIME_BACKUP_KEY]);
+  const entries = await getPlaytime();
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
     sync: {},
-    local: { [PLAYTIME_BACKUP_KEY]: localAll[PLAYTIME_BACKUP_KEY] ?? [] },
+    local: { [PLAYTIME_BACKUP_KEY]: entries },
   };
 }
 
@@ -967,8 +1089,16 @@ function parsePlaytimeBackup(text: string): BackupFile {
 }
 
 async function applyBackup(file: BackupFile, kind: BackupKind): Promise<void> {
+  if (kind === 'playtime') {
+    const entries = Array.isArray(file.local[PLAYTIME_BACKUP_KEY])
+      ? file.local[PLAYTIME_BACKUP_KEY] as GamePlaytimeEntry[]
+      : [];
+    await setPlaytime(entries);
+    return;
+  }
+
   const syncKeys = kind === 'settings' ? [...BACKUP_SYNC_KEYS] : [];
-  const localKeys = kind === 'settings' ? [...BACKUP_LOCAL_KEYS] : [PLAYTIME_BACKUP_KEY];
+  const localKeys = [...BACKUP_LOCAL_KEYS];
   const syncSet = pickKnownKeys(file.sync, syncKeys);
   const localSet = pickKnownKeys(file.local, localKeys);
   const syncRemove = syncKeys.filter((key) => !(key in file.sync));
@@ -1115,6 +1245,13 @@ function formatDuration(seconds: number): string {
   return `${m}m`;
 }
 
+function formatRoProWarnings(warnings: string[]): string {
+  if (!warnings.length) return '';
+  const shown = warnings.slice(0, 3).join(' ');
+  const hidden = warnings.length - 3;
+  return ` ${shown}${hidden > 0 ? ` (${hidden} more note${hidden === 1 ? '' : 's'}.)` : ''}`;
+}
+
 function normalizedPlaytimeSources(
   entry: GamePlaytimeEntry,
   importedSeconds: number,
@@ -1126,6 +1263,16 @@ function normalizedPlaytimeSources(
   if (trackedSeconds > 0) sources.add('tracked_extension');
   else sources.delete('tracked_extension');
   return [...sources];
+}
+
+async function hydrateRoProPlaceEntries(entries: GamePlaytimeEntry[]): Promise<GamePlaytimeEntry[]> {
+  const cache = new Map<number, number | null>();
+  return Promise.all(entries.map(async (entry) => {
+    if (entry.universeId || !entry.placeId) return entry;
+    if (!cache.has(entry.placeId)) cache.set(entry.placeId, await placeIdToUniverseId(entry.placeId));
+    const universeId = cache.get(entry.placeId);
+    return universeId ? { ...entry, universeId } : entry;
+  }));
 }
 
 function countDuplicateUniverseEntries(entries: GamePlaytimeEntry[]): number {
@@ -1163,14 +1310,43 @@ function mergeDuplicateUniverseEntries(entries: GamePlaytimeEntry[]): GamePlayti
       trackedSeconds,
       totalSeconds: importedSeconds + trackedSeconds,
       lastPlayedAt: latestIso(current.lastPlayedAt, entry.lastPlayedAt),
-      windowSeconds: { ...(current.windowSeconds ?? {}), ...(entry.windowSeconds ?? {}) },
+      windowSeconds: mergeWindowSeconds(current.windowSeconds, entry.windowSeconds),
+      trackingBuckets: mergeTrackingBuckets(current.trackingBuckets, entry.trackingBuckets),
       sources: [...new Set([...(current.sources ?? []), ...(entry.sources ?? [])])],
     });
   }
-  return [...byUniverse.values(), ...passthrough].map((entry) => ({
-    ...entry,
-    windowSeconds: entry.windowSeconds && Object.keys(entry.windowSeconds).length ? entry.windowSeconds : undefined,
-  }));
+  return [...byUniverse.values(), ...passthrough];
+}
+
+function mergeWindowSeconds(
+  current: Record<string, number> | undefined,
+  next: Record<string, number> | undefined
+): Record<string, number> | undefined {
+  const out: Record<string, number> = { ...(current ?? {}) };
+  for (const [key, seconds] of Object.entries(next ?? {})) {
+    out[key] = Math.max(out[key] ?? 0, seconds);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function mergeTrackingBuckets(
+  current: GamePlaytimeEntry['trackingBuckets'],
+  next: GamePlaytimeEntry['trackingBuckets']
+): GamePlaytimeEntry['trackingBuckets'] {
+  const hours = mergeBucketMap(current?.hours, next?.hours);
+  const days = mergeBucketMap(current?.days, next?.days);
+  return hours || days ? { hours, days } : undefined;
+}
+
+function mergeBucketMap(
+  current: Record<string, number> | undefined,
+  next: Record<string, number> | undefined
+): Record<string, number> | undefined {
+  const out: Record<string, number> = { ...(current ?? {}) };
+  for (const [key, seconds] of Object.entries(next ?? {})) {
+    out[key] = Math.max(out[key] ?? 0, seconds);
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function latestIso(a?: string, b?: string): string | undefined {
@@ -1229,6 +1405,8 @@ const advancedCss = `
   input, select { height: 34px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.14); background: #111820; color: #fff; padding: 0 10px; box-sizing: border-box; color-scheme: dark; }
   select option { background: #111820; color: #fff; }
   .adv-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #ffe08a; border-color: rgba(245,190,65,0.34); background: rgba(245,190,65,0.10); margin-bottom: 12px; }
+  .adv-ropro-export { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 7px; padding: 13px; margin-top: 12px; }
+  .adv-ropro-json { width: 100%; min-height: 110px; margin-top: 12px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.14); background: #111820; color: #fff; padding: 10px; box-sizing: border-box; color-scheme: dark; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 12px; }
   .adv-playtime-editor { display: flex; flex-direction: column; gap: 12px; }
   .adv-playtime-editor label, .adv-grid-three label, .adv-add-time label { display: flex; flex-direction: column; gap: 6px; color: rgba(232,237,242,0.68); font-size: 12px; font-weight: 650; }
   .adv-grid-three { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }

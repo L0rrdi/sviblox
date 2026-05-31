@@ -21,7 +21,8 @@ export function mergePlaytime(
     const sources = Array.from(new Set([...(cur.sources ?? []), ...(e.sources ?? [])]));
     const importedSeconds = Math.max(cur.importedSeconds ?? 0, e.importedSeconds ?? 0);
     const trackedSeconds = Math.max(cur.trackedSeconds ?? 0, e.trackedSeconds ?? 0);
-    const windowSeconds = { ...(cur.windowSeconds ?? {}), ...(e.windowSeconds ?? {}) };
+    const windowSeconds = mergeWindowSeconds(cur.windowSeconds, e.windowSeconds);
+    const trackingBuckets = mergeTrackingBuckets(cur.trackingBuckets, e.trackingBuckets);
     map.set(k, {
       ...cur,
       ...e,
@@ -29,12 +30,44 @@ export function mergePlaytime(
       trackedSeconds,
       totalSeconds: importedSeconds + trackedSeconds,
       lastPlayedAt: latestDate(cur.lastPlayedAt, e.lastPlayedAt),
-      windowSeconds: Object.keys(windowSeconds).length ? windowSeconds : undefined,
+      windowSeconds,
+      trackingBuckets,
       sources,
     });
   }
 
   return [...map.values()];
+}
+
+function mergeWindowSeconds(
+  current: Record<string, number> | undefined,
+  next: Record<string, number> | undefined
+): Record<string, number> | undefined {
+  const out: Record<string, number> = { ...(current ?? {}) };
+  for (const [key, seconds] of Object.entries(next ?? {})) {
+    out[key] = Math.max(out[key] ?? 0, seconds);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function mergeTrackingBuckets(
+  current: GamePlaytimeEntry['trackingBuckets'],
+  next: GamePlaytimeEntry['trackingBuckets']
+): GamePlaytimeEntry['trackingBuckets'] {
+  const hours = mergeBucketMap(current?.hours, next?.hours);
+  const days = mergeBucketMap(current?.days, next?.days);
+  return hours || days ? { hours, days } : undefined;
+}
+
+function mergeBucketMap(
+  current: Record<string, number> | undefined,
+  next: Record<string, number> | undefined
+): Record<string, number> | undefined {
+  const out: Record<string, number> = { ...(current ?? {}) };
+  for (const [key, seconds] of Object.entries(next ?? {})) {
+    out[key] = Math.max(out[key] ?? 0, seconds);
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 function latestDate(a?: string, b?: string): string | undefined {
