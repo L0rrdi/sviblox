@@ -1,7 +1,7 @@
 import { getGameInfo, getGameVotes, GameInfo, GameVote } from '@/api/games';
 import { getMyGames, OwnedGame } from '@/api/myGames';
 import { getGameIcons } from '@/api/thumbnails';
-import { getAuthenticatedUserId } from '@/api/users';
+import { getAuthenticatedUserIdFresh } from '@/api/users';
 import { escapeHtml } from '@/util/html';
 import {
   applyHomeListSnapshot,
@@ -15,11 +15,14 @@ import {
   updateCurrentHomeListSection,
 } from './favoritesSection';
 
-// One-shot per page load. Mirrors favoritesSection — any failure that
-// completes the first call also counts, since the MutationObserver would
-// otherwise retry on every tick.
-let myGamesLoaded = false;
-let myGamesSnapshot: HomeListSnapshot | null = null;
+// One-shot per signed-in Roblox user. Mirrors favoritesSection so switching
+// accounts does not keep showing the previous user's creations row.
+const SIGNED_OUT_MY_GAMES_KEY = 'signed-out';
+const MY_GAMES_USER_CHECK_MS = 15_000;
+let myGamesUserKey: string | null = null;
+let myGamesUserCheckedAt = 0;
+let myGamesUserCheckInFlight: Promise<void> | null = null;
+const myGamesSnapshots = new Map<string, HomeListSnapshot>();
 
 export function ensureMyGamesSection(): HTMLElement {
   let section = document.getElementById(MY_GAMES_SECTION_ID);
@@ -40,26 +43,64 @@ export function ensureMyGamesSection(): HTMLElement {
     `;
   }
   ensureHomeListScroller(section);
-  if (myGamesSnapshot) applyHomeListSnapshot(section, myGamesSnapshot);
-  if (!myGamesLoaded) {
-    myGamesLoaded = true;
-    void loadMyGames(section);
+  if (myGamesUserKey) {
+    const snapshot = myGamesSnapshots.get(myGamesUserKey);
+    if (snapshot) applyHomeListSnapshot(section, snapshot);
   }
+  void ensureMyGamesForCurrentUser(section);
   return section;
 }
 
-async function loadMyGames(section: HTMLElement): Promise<void> {
+async function ensureMyGamesForCurrentUser(section: HTMLElement): Promise<void> {
+  if (
+    myGamesUserCheckInFlight ||
+    (myGamesUserKey && Date.now() - myGamesUserCheckedAt < MY_GAMES_USER_CHECK_MS)
+  ) {
+    return myGamesUserCheckInFlight ?? undefined;
+  }
+
+  myGamesUserCheckInFlight = (async () => {
+    const userId = await getAuthenticatedUserIdFresh();
+    myGamesUserCheckedAt = Date.now();
+    const nextKey = userId ? String(userId) : SIGNED_OUT_MY_GAMES_KEY;
+    if (nextKey === myGamesUserKey && myGamesSnapshots.has(nextKey)) return;
+
+    myGamesUserKey = nextKey;
+    const cached = myGamesSnapshots.get(nextKey);
+    if (cached) {
+      updateCurrentHomeListSection(MY_GAMES_SECTION_ID, cached, section);
+      return;
+    }
+
+    const loadingSnapshot: HomeListSnapshot = {
+      metaText: 'SviBlox',
+      rowHtml: '<li class="bp-fav-empty">Loading...</li>',
+      seeAllHref: userId ? myGamesSeeAllUrl(userId) : null,
+    };
+    updateCurrentHomeListSection(MY_GAMES_SECTION_ID, loadingSnapshot, section);
+    await loadMyGamesForUser(section, userId, nextKey);
+  })().finally(() => {
+    myGamesUserCheckInFlight = null;
+  });
+  return myGamesUserCheckInFlight;
+}
+
+async function loadMyGamesForUser(
+  section: HTMLElement,
+  userId: number | null,
+  userKey: string
+): Promise<void> {
   const rowEl = section.querySelector('.bp-fav-row') as HTMLElement;
   const metaEl = section.querySelector('.bp-fav-meta') as HTMLElement;
 
-  const userId = await getAuthenticatedUserId();
   if (!userId) {
-    myGamesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-error">Sign in to view your games.</li>`,
       seeAllHref: null,
     };
-    updateCurrentHomeListSection(MY_GAMES_SECTION_ID, myGamesSnapshot, section);
+    myGamesSnapshots.set(userKey, snapshot);
+    updateCurrentMyGamesSection(userKey, snapshot, section);
     return;
   }
   const seeAllHref = myGamesSeeAllUrl(userId);
@@ -71,22 +112,24 @@ async function loadMyGames(section: HTMLElement): Promise<void> {
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
     console.error('[SviBlox] my games fetch failed:', e);
-    myGamesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-error">Failed to load your games: ${escapeHtml(msg)}</li>`,
       seeAllHref,
     };
-    updateCurrentHomeListSection(MY_GAMES_SECTION_ID, myGamesSnapshot, section);
+    myGamesSnapshots.set(userKey, snapshot);
+    updateCurrentMyGamesSection(userKey, snapshot, section);
     return;
   }
 
   if (!games.length) {
-    myGamesSnapshot = {
+    const snapshot = {
       metaText: 'SviBlox',
       rowHtml: `<li class="bp-fav-empty">You haven't published any public games.</li>`,
       seeAllHref,
     };
-    updateCurrentHomeListSection(MY_GAMES_SECTION_ID, myGamesSnapshot, section);
+    myGamesSnapshots.set(userKey, snapshot);
+    updateCurrentMyGamesSection(userKey, snapshot, section);
     return;
   }
 
@@ -100,14 +143,24 @@ async function loadMyGames(section: HTMLElement): Promise<void> {
     getGameInfo(universeIds),
     getGameVotes(universeIds),
   ]);
-  myGamesSnapshot = {
+  const snapshot = {
     seeAllHref,
     metaText: `SviBlox · ${games.length} game${games.length === 1 ? '' : 's'}`,
     rowHtml: games
       .map((g) => myGameTile(g, icons.get(g.id), info.get(g.id), votes.get(g.id)))
       .join(''),
   };
-  updateCurrentHomeListSection(MY_GAMES_SECTION_ID, myGamesSnapshot, section);
+  myGamesSnapshots.set(userKey, snapshot);
+  updateCurrentMyGamesSection(userKey, snapshot, section);
+}
+
+function updateCurrentMyGamesSection(
+  userKey: string,
+  snapshot: HomeListSnapshot,
+  section: HTMLElement
+): void {
+  if (myGamesUserKey !== userKey) return;
+  updateCurrentHomeListSection(MY_GAMES_SECTION_ID, snapshot, section);
 }
 
 function myGameTilePlaceholder(g: OwnedGame): string {

@@ -1,4 +1,4 @@
-import { getPlaytime } from '@/storage/playtimeStore';
+import { getPlaytime, hasPlaytimeStorageChange } from '@/storage/playtimeStore';
 import { setSettings } from '@/storage/settingsStore';
 import { getGameInfo, GameInfo } from '@/api/games';
 import { getGameIcons } from '@/api/thumbnails';
@@ -29,24 +29,25 @@ const WINDOW_MS: Record<WindowKey, number | null> = {
 };
 
 /**
- * Some windows match a key in `windowSeconds` populated by the importer
- * (RoPro stores per-window minutes for 30 and 999). Others fall back to
- * recency filtering on lastPlayedAt + totalSeconds.
+ * Some windows match a key in `windowSeconds` populated by the importer.
+ * SviBlox-tracked time uses rolling hourly/daily buckets. Do not fall back to
+ * lifetime totals for recent windows; that makes "Past 24 hours" show
+ * impossible values like 34h when the game was merely played recently.
  */
 const WINDOW_DATA_KEY: Record<WindowKey, string | null> = {
   all: null,
-  year: null,
+  year: '365',
   '30d': '30',
-  '7d': null,
-  '24h': null,
+  '7d': '7',
+  '24h': '1',
 };
 
 function fmtHours(seconds: number): string {
-  const h = Math.round(seconds / 3600);
-  if (h <= 0) {
+  if (seconds < 3600) {
     const m = Math.max(1, Math.round(seconds / 60));
     return `${m} min`;
   }
+  const h = Math.round(seconds / 3600);
   return `${h.toLocaleString()} ${h === 1 ? 'hour' : 'hours'}`;
 }
 
@@ -254,7 +255,7 @@ const activeScrollAnimations = new WeakMap<HTMLElement, number>();
 
 /**
  * Live-refresh hook: the SW per-minute presence accumulator writes to
- * `bloxplus.playtime` while the user has the home page open. Without
+ * the playtime storage while the user has the home page open. Without
  * this, tracked time only shows up after a navigation away and back.
  * Subscription is installed once at module level (idempotent) and only
  * does work while the widget is mounted.
@@ -263,7 +264,7 @@ function ensurePlaytimeSubscription(): void {
   if (playtimeSubscribed) return;
   playtimeSubscribed = true;
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes['bloxplus.playtime']) return;
+    if (area !== 'local' || !hasPlaytimeStorageChange(changes)) return;
     if (!widget || !state || state.destroyed) return;
     void refreshFromStorage();
   });
@@ -505,37 +506,90 @@ function animateMostPlayedScroll(row: HTMLElement, target: number): void {
   activeScrollAnimations.set(row, requestAnimationFrame(tick));
 }
 
-function passesRecency(e: GamePlaytimeEntry, w: WindowKey): boolean {
-  const ms = WINDOW_MS[w];
-  if (ms === null) return true;
-  if (!e.lastPlayedAt) return false;
-  const t = Date.parse(e.lastPlayedAt);
-  return Number.isFinite(t) && t >= Date.now() - ms;
+function windowPlaytime(e: GamePlaytimeEntry, w: WindowKey): { seconds: number; estimated: boolean } {
+  if (w === 'all') return { seconds: e.totalSeconds ?? 0, estimated: false };
+
+  const dk = WINDOW_DATA_KEY[w];
+  const importedWindowSeconds = dk !== null ? e.windowSeconds?.[dk] ?? 0 : 0;
+  const tracked = trackedSecondsForWindow(e, w);
+  return {
+    seconds: capSecondsToWindow(importedWindowSeconds + tracked.seconds, w),
+    estimated: tracked.estimated,
+  };
 }
 
-function secondsForWindow(e: GamePlaytimeEntry, w: WindowKey): number {
-  const dk = WINDOW_DATA_KEY[w];
-  if (dk !== null) return e.windowSeconds?.[dk] ?? 0;
-  // No per-window data: only count if active in the window, then use total.
-  return passesRecency(e, w) ? e.totalSeconds : 0;
+function trackedSecondsForWindow(e: GamePlaytimeEntry, w: WindowKey): { seconds: number; estimated: boolean } {
+  const ms = WINDOW_MS[w];
+  if (ms === null) return { seconds: e.trackedSeconds ?? 0, estimated: false };
+  const cutoff = Date.now() - ms;
+  const buckets = w === '24h' ? e.trackingBuckets?.hours : e.trackingBuckets?.days;
+  const parseStart = w === '24h' ? hourBucketStartMs : dayBucketStartMs;
+  const bucketSeconds = sumBucketsSince(buckets, cutoff, parseStart);
+
+  // Compatibility for playtime collected before rolling buckets existed.
+  // Use trackedSeconds only, never imported lifetime totals, and cap to the
+  // selected window so recent windows cannot show physically impossible time.
+  const legacyUnbucketedSeconds = Math.max(0, (e.trackedSeconds ?? 0) - sumBucketValues(buckets));
+  if (!playedInsideWindow(e, cutoff) || legacyUnbucketedSeconds <= 0) {
+    return { seconds: bucketSeconds, estimated: false };
+  }
+
+  return {
+    seconds: bucketSeconds + capSecondsToWindow(legacyUnbucketedSeconds, w),
+    estimated: true,
+  };
+}
+
+function sumBucketsSince(
+  buckets: Record<string, number> | undefined,
+  cutoffMs: number,
+  parseStart: (key: string) => number
+): number {
+  let total = 0;
+  for (const [key, seconds] of Object.entries(buckets ?? {})) {
+    const start = parseStart(key);
+    if (Number.isFinite(start) && start >= cutoffMs) total += Math.max(0, seconds);
+  }
+  return total;
+}
+
+function sumBucketValues(buckets: Record<string, number> | undefined): number {
+  return Object.values(buckets ?? {}).reduce((sum, seconds) => sum + Math.max(0, seconds), 0);
+}
+
+function hourBucketStartMs(key: string): number {
+  return Date.parse(`${key}:00:00.000Z`);
+}
+
+function dayBucketStartMs(key: string): number {
+  return Date.parse(`${key}T00:00:00.000Z`);
+}
+
+function capSecondsToWindow(seconds: number, w: WindowKey): number {
+  const ms = WINDOW_MS[w];
+  if (ms === null) return seconds;
+  return Math.min(Math.max(0, seconds), ms / 1000);
+}
+
+function playedInsideWindow(e: GamePlaytimeEntry, cutoffMs: number): boolean {
+  if (!e.lastPlayedAt) return false;
+  const ts = Date.parse(e.lastPlayedAt);
+  return Number.isFinite(ts) && ts >= cutoffMs;
 }
 
 function renderTiles(): void {
   if (!widget || !state) return;
   const w = state.currentWindow;
   const ranked = state.all
-    .map((e) => ({ e, sec: secondsForWindow(e, w) }))
-    .filter((r) => r.sec > 0)
-    .sort((a, b) => b.sec - a.sec);
+    .map((e) => ({ e, ...windowPlaytime(e, w) }))
+    .filter((r) => r.seconds > 0)
+    .sort((a, b) => b.seconds - a.seconds);
   const top = ranked.slice(0, MAX_TILES);
 
   const meta = widget.querySelector('.bp-meta') as HTMLElement;
-  const totalSec = ranked.reduce((s, r) => s + r.sec, 0);
-  const hasExplicitWindow = WINDOW_DATA_KEY[w] !== null || w === 'all';
-  const note = hasExplicitWindow
-    ? WINDOW_LABELS[w].toLowerCase()
-    : `active in ${WINDOW_LABELS[w].toLowerCase()} (lifetime hours shown)`;
-  meta.textContent = `${ranked.length} games · ${fmtHours(totalSec)} · ${note}`;
+  const totalSec = ranked.reduce((s, r) => s + r.seconds, 0);
+  const estimateNote = ranked.some((r) => r.estimated) ? ' · older tracked totals capped' : '';
+  meta.textContent = `${ranked.length} games · ${fmtHours(totalSec)} · ${WINDOW_LABELS[w].toLowerCase()}${estimateNote}`;
 
   const rowEl = widget.querySelector('.bp-row') as HTMLElement;
   if (!top.length) {
@@ -545,7 +599,7 @@ function renderTiles(): void {
   }
 
   rowEl.innerHTML = top
-    .map(({ e, sec }) => {
+    .map(({ e, seconds }) => {
       const id = e.universeId;
       const info = id ? state!.info.get(id) : undefined;
       const icon = id ? state!.icons.get(id) : undefined;
@@ -560,7 +614,7 @@ function renderTiles(): void {
         <a class="bp-tile" href="${href}">
           <img src="${icon ?? ''}" alt="${escapeHtml(name)}" loading="lazy" />
           <div class="bp-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
-          <div class="bp-time">${fmtHours(sec)}</div>
+          <div class="bp-time">${fmtHours(seconds)}</div>
         </a>
       `;
     })

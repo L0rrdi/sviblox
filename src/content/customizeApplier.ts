@@ -24,14 +24,25 @@ import { tagAll } from './customizeIdentity';
 // Prime the in-memory cache once so synchronous reads work on every tick.
 let primed = false;
 let runSeq = 0;
+let applyScheduled = false;
+
 function prime(): void {
   if (primed) return;
   primed = true;
   void getCustomizations();
   onCustomizationsChanged(() => {
-    // No work to do here — the next dispatch tick will re-apply.
+    scheduleApply();
   });
   ensureStyle();
+}
+
+function scheduleApply(): void {
+  if (applyScheduled) return;
+  applyScheduled = true;
+  requestAnimationFrame(() => {
+    applyScheduled = false;
+    void runAsync();
+  });
 }
 
 const STYLE_ID = 'bloxplus-customize-applier-style';
@@ -425,19 +436,29 @@ function applyHidden(li: HTMLElement, hidden: boolean | undefined, softHide: boo
   }
 }
 
+function findInteractiveRoot(host: HTMLElement): HTMLElement | null {
+  if (host.matches('a, button')) return host;
+  return host.querySelector<HTMLElement>('a, button');
+}
+
 function findLabel(li: HTMLElement): HTMLElement | null {
-  const a = li.querySelector('a');
+  const a = findInteractiveRoot(li);
   if (!a) return null;
   // Modern Roblox nav: label sits in `span.text-truncate-end` next to the
   // icon-container span. Legacy nav used `.text-nav` / `.font-header-2`.
-  // SviBlox-injected entries use plain `span` children. Fall back to the
-  // last text-bearing span if none of the known classes match.
+  // Header/profile entries use `.font-caption-header`. SviBlox-injected
+  // entries use plain `span` children. Fall back to the last text-bearing
+  // span if none of the known classes match.
+  if (a.matches('.nav-menu-title, .font-header-2') && (a.textContent ?? '').trim()) return a;
   const direct =
     a.querySelector<HTMLElement>(':scope > span.text-truncate-end') ??
     a.querySelector<HTMLElement>(':scope > .min-width-0') ??
+    a.querySelector<HTMLElement>(':scope > .font-caption-header') ??
+    a.querySelector<HTMLElement>(':scope > .age-bracket-label-username') ??
     a.querySelector<HTMLElement>('.text-nav') ??
     a.querySelector<HTMLElement>('.font-header-2');
   if (direct) return direct;
+  if (li.closest('#header') && li.matches('.navbar-icon-item, .rbx-navbar-right-search')) return null;
   // Generic fallback: the last <span> direct child of <a> with text content.
   const spans = [...a.querySelectorAll<HTMLElement>(':scope > span')].reverse();
   return spans.find((s) => (s.textContent ?? '').trim().length > 0) ?? null;
@@ -459,12 +480,12 @@ function applyText(li: HTMLElement, text: string | undefined): void {
 }
 
 function applyIcon(li: HTMLElement, iconUrl: string | undefined, iconPreset: string | undefined): void {
-  const anchor = li.querySelector('a');
+  const anchor = findInteractiveRoot(li);
   if (!anchor) return;
   let custIcon = anchor.querySelector<HTMLImageElement>(':scope > img.bp-cust-icon');
   let animatedIcon = anchor.querySelector<SVGSVGElement>(':scope > svg.bp-animated-nav-icon');
   const native = anchor.querySelector<HTMLElement>(
-    ':scope > span.size-1000, :scope > svg:not(.bp-animated-nav-icon), :scope > img:not(.bp-cust-icon), :scope > .bp-nav-icon, :scope > [class*="icon" i]:not(.bp-animated-nav-icon)'
+    ':scope > span.size-1000, :scope > span.avatar, :scope > span.nav-robux-icon, :scope > span[class*="icon" i]:not(.bp-animated-nav-icon), :scope > svg:not(.bp-animated-nav-icon), :scope > img:not(.bp-cust-icon), :scope > .bp-nav-icon, :scope > [class*="icon" i]:not(.bp-animated-nav-icon)'
   );
   if (isAnimatedIconPresetId(iconPreset)) {
     if (custIcon) {

@@ -34,6 +34,7 @@ import {
   customId,
   findCustomizableAncestor,
   resolveById,
+  surfaceOf,
   tagAll,
 } from './customizeIdentity';
 
@@ -44,6 +45,7 @@ const BODY_CLASS = 'bp-customize-mode';
 
 let installed = false;
 let active = false;
+let forcedActive = false;
 let selectedId: string | null = null;
 let pendingCustomIconDataUrl = '';
 let iconColorToolsForId: string | null = null;
@@ -95,9 +97,17 @@ export function run(): void {
   void runAsync();
 }
 
+export function openCustomizeMode(): void {
+  forcedActive = true;
+  if (!isCustomizeRoute()) {
+    location.hash = ROUTE_HASH;
+  }
+  void runAsync();
+}
+
 async function runAsync(): Promise<void> {
   const settings = await getSettings();
-  const wantActive = settings.showCustomize && isCustomizeRoute();
+  const wantActive = settings.showCustomize && (forcedActive || isCustomizeRoute());
   if (wantActive && !active) enterMode();
   else if (!wantActive && active) exitMode();
   // If active and the drawer was removed by something else (overlay handoff,
@@ -121,6 +131,7 @@ function enterMode(): void {
 
 function exitMode(): void {
   active = false;
+  forcedActive = false;
   selectedId = null;
   // Don't carry an in-progress "Add custom button" upload across sessions.
   // Without this, exiting after uploading but before clicking Add leaves
@@ -147,7 +158,7 @@ function clickInterceptor(e: MouseEvent): void {
   const li = findCustomizableAncestor(e.target as Element);
   if (!li) return;
   const nextId = customId(li);
-  // Toggle: clicking the already-selected nav item closes the editor.
+  // Toggle: clicking the already-selected item closes the editor.
   setSelectedId(selectedId === nextId ? null : nextId);
   renderDrawer();
 }
@@ -262,9 +273,24 @@ function getNavTargets(): ReturnType<typeof tagAll> {
 }
 
 function targetText(el: HTMLElement): string {
+  const headerName = headerTargetName(el);
+  if (headerName) return headerName;
   const clone = el.cloneNode(true) as HTMLElement;
   // (no inline order controls inside the LI — drag handles use attributes, not inner elements)
   return clone.textContent?.trim() ?? '';
+}
+
+function headerTargetName(el: HTMLElement): string {
+  if (surfaceOf(el) !== 'header') return '';
+  if (el.matches('#nav-logo-link')) return 'Roblox logo';
+  if (el.id === 'navbar-stream') return 'Notifications';
+  if (el.id === 'navbar-robux') return 'Robux balance';
+  if (el.id === 'navbar-settings') return 'Settings';
+  if (el.classList.contains('rbx-navbar-right-search')) return 'Search button';
+  const link = el.matches('a') ? el as HTMLAnchorElement : el.querySelector<HTMLAnchorElement>('a');
+  const text = link?.textContent?.trim() || el.textContent?.trim() || '';
+  if (text) return text;
+  return el.getAttribute('aria-label') || el.getAttribute('title') || '';
 }
 
 function customButtonForId(
@@ -505,6 +531,7 @@ function renderActiveList(spec: ReturnType<typeof getCachedCustomizations>): str
       const displayLabel = cleanEditText(edit.text, id) || customButton?.label || liveLabel || '(unnamed)';
       const chips: string[] = [];
       if (customIds.has(id)) chips.push('Custom');
+      if (id.startsWith('header::')) chips.push('Header');
       if (edit.text) chips.push('Renamed');
       if (edit.hidden) chips.push('Hidden');
       if (edit.iconDataUrl || edit.iconPreset || customButton?.iconDataUrl || customButton?.iconPreset) chips.push('Icon');
@@ -554,11 +581,12 @@ function primaryChip(chips: string[]): string {
   if (chips.includes('Renamed')) return 'Renamed';
   if (chips.includes('Icon')) return 'Icon';
   if (chips.includes('Custom')) return 'Custom';
+  if (chips.includes('Header')) return 'Header';
   return 'Other';
 }
 
 function chipSortIndex(label: string): number {
-  const order = ['Hidden', 'Renamed', 'Icon', 'Custom', 'Other'];
+  const order = ['Hidden', 'Renamed', 'Icon', 'Custom', 'Header', 'Other'];
   const index = order.indexOf(label);
   return index === -1 ? order.length : index;
 }
@@ -603,7 +631,7 @@ function flashHighlight(el: HTMLElement | null): void {
 function renderEmpty(): string {
   return `
     <p class="bp-cust-hint">
-      Click any left-nav item to edit it. You can rename, hide, or replace its icon.
+      Click any left-nav or header item to edit it. You can rename, hide, or replace its icon.
       Press <kbd>Esc</kbd> or use the Exit button to leave customize mode.
     </p>
   `;
@@ -726,7 +754,9 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   });
   drawer.querySelector('[data-action="reset-element"]')?.addEventListener('click', () => {
     if (!selectedId) return;
-    void removeEntry(selectedId);
+    const id = selectedId;
+    setSelectedId(null);
+    void removeEntry(id);
   });
   drawer.querySelector('[data-action="delete-custom-button"]')?.addEventListener('click', () => {
     if (!selectedId?.startsWith('leftnav::custom-button-')) return;
@@ -1109,6 +1139,11 @@ function ensureStyle(): void {
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
+    body.${BODY_CLASS} #nav-logo-link:hover,
+    body.${BODY_CLASS} #header .rbx-navbar > li:hover,
+    body.${BODY_CLASS} #header .age-bracket-label:hover,
+    body.${BODY_CLASS} #header .rbx-navbar-icon-group > li.rbx-navbar-right-search:hover,
+    body.${BODY_CLASS} #header .rbx-navbar-icon-group > li.navbar-icon-item:hover,
     body.${BODY_CLASS} .left-nav nav ul > li:hover,
     body.${BODY_CLASS} .left-nav ul > li:hover,
     body.${BODY_CLASS} .left-col-list > li:hover,
@@ -1377,6 +1412,7 @@ function ensureStyle(): void {
     #${DRAWER_ID} .bp-cust-list-group-renamed { color: #ffe08a; }
     #${DRAWER_ID} .bp-cust-list-group-icon { color: #99f6e4; }
     #${DRAWER_ID} .bp-cust-list-group-custom { color: #b9ddff; }
+    #${DRAWER_ID} .bp-cust-list-group-header { color: #c4b5fd; }
     #${DRAWER_ID} .bp-cust-list-item {
       display: flex; align-items: stretch;
       background: rgba(255,255,255,0.04);
@@ -1413,6 +1449,10 @@ function ensureStyle(): void {
     #${DRAWER_ID} .bp-cust-chip-custom {
       background: rgba(74,144,226,0.22);
       color: #b9ddff;
+    }
+    #${DRAWER_ID} .bp-cust-chip-header {
+      background: rgba(139, 92, 246, 0.20);
+      color: #c4b5fd;
     }
     #${DRAWER_ID} .bp-cust-chip-renamed {
       background: rgba(245, 190, 65, 0.22);
