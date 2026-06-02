@@ -22,13 +22,16 @@ import {
   overwriteUserTheme,
   suggestNextUserTheme,
   setCustomThemeBackground,
+  setCustomThemeVideo,
   removeCustomThemeBackground,
   onUserThemesChanged,
 } from '@/storage/themeStore';
+import { putVideo, getVideo, deleteVideo } from '@/storage/videoStore';
 import {
   getPresets,
   setPreviewTheme,
   setBackgroundBrightnessPreview,
+  setBackgroundVolumePreview,
   setBackgroundImagePreview,
 } from './themeInjector';
 import {
@@ -48,6 +51,10 @@ const HIDE_PRIOR_DISPLAY_ATTR = 'data-bp-themes-prior-display';
 // is ~5.3 MB per preset. Previously 16 MB, which produced ~21 MB blobs per
 // preset and ate local storage fast once multi-preset themes shipped.
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+// Videos are stored as raw blobs in IndexedDB (not base64 in chrome.storage),
+// so they can be much larger than stills. Cap to keep page-load + GPU sane.
+const MAX_VIDEO_BYTES = 128 * 1024 * 1024;
+const VIDEO_MIME_RE = /^video\/(mp4|webm|ogg)$/i;
 
 function isThemesRoute(): boolean {
   return location.hash.replace(/^#/, '') === 'bloxplus-themes';
@@ -159,7 +166,8 @@ function ensureStyle(): void {
 
     #${PAGE_ID} .bp-bg-controls { display: flex; flex-direction: column; gap: 12px; }
     #${PAGE_ID} .bp-bg-preview {
-      width: 100%; max-height: 220px; min-height: 120px;
+      position: relative; overflow: hidden;
+      width: 100%; height: 160px; max-height: 220px; min-height: 120px;
       background: #15171c center/cover no-repeat;
       border: 1px solid rgba(255,255,255,0.1);
       border-radius: 6px;
@@ -309,8 +317,8 @@ function findHomeContentHost(): HTMLElement | null {
   return main instanceof HTMLElement ? main : null;
 }
 
-const SIBLING_OVERLAY_IDS = ['bloxplus-uhbl-page'];
-const OVERLAY_HASHES = ['bloxplus-themes', 'bloxplus-uhbl'];
+const SIBLING_OVERLAY_IDS = ['bloxplus-uhbl-page', 'bloxplus-badgerhub-page'];
+const OVERLAY_HASHES = ['bloxplus-themes', 'bloxplus-uhbl', 'bloxplus-badgerhub'];
 
 function hideHomeContent(host: HTMLElement): void {
   for (const child of host.children) {
@@ -569,24 +577,25 @@ async function render(page: HTMLElement): Promise<void> {
     </div>
 
     <div class="bp-tp-section">
-      <h2>Background image</h2>
+      <h2>Background image or video</h2>
       <div class="bp-bg-controls">
         <div class="bp-bg-preview">
-          ${custom.backgroundImage ? '' : 'No background image set'}
+          ${custom.backgroundImage || custom.backgroundVideoId ? '' : 'No background set'}
         </div>
         <div class="bp-bg-row">
-          <input type="file" accept="image/*" data-bg-file />
+          <input type="file" accept="image/*,video/mp4,video/webm" data-bg-file />
           <div class="bp-mode-row">
             <label>Layout
               <select data-bg-mode>
                 <option value="cover" ${custom.backgroundMode === 'cover' || !custom.backgroundMode ? 'selected' : ''}>Fill (cover)</option>
                 <option value="contain" ${custom.backgroundMode === 'contain' ? 'selected' : ''}>Fit (contain)</option>
-                <option value="tile" ${custom.backgroundMode === 'tile' ? 'selected' : ''}>Tile</option>
+                <option value="tile" ${custom.backgroundMode === 'tile' ? 'selected' : ''}>Tile (image only)</option>
               </select>
             </label>
           </div>
-          <button class="bp-btn bp-btn-danger" data-action="remove-bg" ${custom.backgroundImage ? '' : 'disabled'}>Remove image</button>
+          <button class="bp-btn bp-btn-danger" data-action="remove-bg" ${custom.backgroundImage || custom.backgroundVideoId ? '' : 'disabled'}>Remove background</button>
         </div>
+        <p class="bp-tp-sub" style="margin: 2px 0 0 0;">Animated wallpapers: upload an .mp4 / .webm. Large files play smoother when downscaled to 720p first.</p>
         <div class="bp-bg-row">
           <label class="bp-brightness-label">Brightness
             <input type="range" min="0" max="200" step="1"
@@ -595,6 +604,16 @@ async function render(page: HTMLElement): Promise<void> {
             <span data-bg-brightness-readout>${clampBrightnessForUI(custom.backgroundBrightness)}%</span>
           </label>
         </div>
+        ${custom.backgroundVideoId ? `
+        <div class="bp-bg-row">
+          <label class="bp-brightness-label">Video volume
+            <input type="range" min="0" max="100" step="1"
+                   value="${clampVolumeForUI(custom.backgroundVideoVolume)}"
+                   data-bg-volume />
+            <span data-bg-volume-readout>${clampVolumeForUI(custom.backgroundVideoVolume)}%</span>
+          </label>
+        </div>
+        <p class="bp-tp-sub" style="margin: 2px 0 0 0;">Muted by default. Audio is silenced automatically while the browser window is in the background.</p>` : ''}
         <div class="bp-status"></div>
       </div>
     </div>
@@ -622,9 +641,18 @@ async function render(page: HTMLElement): Promise<void> {
   `;
 
   // Data-URL backgrounds can't ride inside a style attribute via innerHTML.
-  if (custom.backgroundImage) {
+  // Poster/still paints onto the box; a video preset additionally mounts a
+  // muted looping <video> over it (loaded async from IndexedDB).
+  {
     const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
-    if (preview) preview.style.backgroundImage = `url(${JSON.stringify(custom.backgroundImage)})`;
+    if (preview) {
+      if (custom.backgroundImage) {
+        preview.style.backgroundImage = `url(${JSON.stringify(custom.backgroundImage)})`;
+      }
+      if (custom.backgroundVideoId) {
+        void mountPreviewVideo(preview, custom.backgroundVideoId);
+      }
+    }
   }
   // Paint each user preset's swatch with its own backgroundImage when set.
   for (const id of userThemes.order) {
@@ -657,6 +685,15 @@ async function render(page: HTMLElement): Promise<void> {
       setPreviewTheme(null);
       setBackgroundImagePreview(null);
     }
+  };
+
+  // Lightweight dirty-bar toggle for the brightness/volume sliders. The overlay
+  // is already updated live by setBackgroundBrightnessPreview/VolumePreview
+  // (which set a preview override the dispatch respects), so we must NOT call
+  // the heavy markDirty here — rebuilding the whole theme CSS via
+  // setPreviewTheme on every slider tick is what made dragging lag.
+  const updateDirtyBar = () => {
+    draftBar?.classList.toggle('bp-dirty', JSON.stringify(draft) !== initialSnapshot);
   };
 
   // Preset selection (click on a tile that isn't a tool button).
@@ -781,14 +818,65 @@ async function render(page: HTMLElement): Promise<void> {
     setStatus('Palette cleared — Apply to save.');
   });
 
-  // Background image upload — commits to the active preset instantly.
+  // Background upload — image or video. Commits to the active preset instantly.
   // On a built-in (which can't be overwritten) we have to land somewhere, so
   // fall back to a name prompt and create a new preset that carries both the
-  // image and the in-progress palette draft.
+  // asset and the in-progress palette draft.
   const fileEl = page.querySelector<HTMLInputElement>('[data-bg-file]');
   fileEl?.addEventListener('change', async () => {
     const f = fileEl.files?.[0];
     if (!f) return;
+
+    // ── Video path ────────────────────────────────────────────────────────
+    if (VIDEO_MIME_RE.test(f.type)) {
+      if (f.size > MAX_VIDEO_BYTES) {
+        setStatus(`Video is ${formatBytes(f.size)}. Please pick one under ${formatBytes(MAX_VIDEO_BYTES)}.`);
+        fileEl.value = '';
+        return;
+      }
+      setStatus('Storing video…');
+      const videoId = await putVideo(f);
+      const poster = await captureVideoPoster(f);
+
+      if (activeEntry) {
+        await setCustomThemeVideo(videoId, poster);
+        fileEl.value = '';
+        setStatus(`Video saved to "${activeEntry.name}".`);
+        // Unlike the image path (which updates in place to preserve palette
+        // dirtiness), re-render so the new "Video volume" slider appears for
+        // the now-video background. The live overlay updates via the storage
+        // write → onCustomThemeChanged → applyCurrent.
+        await render(page);
+        return;
+      }
+
+      // Built-in active — needs a target preset.
+      const suggestion = suggestNextUserTheme(userThemes);
+      const name = await openNameModal({
+        title: 'Name your new theme',
+        defaultValue: suggestion.name,
+        confirmLabel: 'Create',
+      });
+      if (name == null) {
+        await deleteVideo(videoId); // user backed out — don't leave an orphan blob
+        setStatus('');
+        fileEl.value = '';
+        return;
+      }
+      const created = await createUserTheme(name, {
+        ...draft,
+        backgroundVideoId: videoId,
+        backgroundImage: poster,
+      });
+      await setSettings(activationPatch(created.id));
+      setPreviewTheme(null);
+      setBackgroundImagePreview(null);
+      setStatus(`Saved as "${created.name}".`);
+      await render(page);
+      return;
+    }
+
+    // ── Image path ────────────────────────────────────────────────────────
     if (f.size > MAX_IMAGE_BYTES) {
       setStatus(`Image is ${formatBytes(f.size)}. Please pick one under ${formatBytes(MAX_IMAGE_BYTES)}.`);
       return;
@@ -797,13 +885,21 @@ async function render(page: HTMLElement): Promise<void> {
     const dataUrl = await fileToDataUrl(f);
 
     if (activeEntry) {
+      // setCustomThemeBackground clears any prior video + deletes its blob.
       await setCustomThemeBackground(dataUrl);
       draft.backgroundImage = dataUrl;
+      draft.backgroundVideoId = undefined;
       custom.backgroundImage = dataUrl;
+      custom.backgroundVideoId = undefined;
       // Keep the image field out of "dirty" — palette dirtiness is preserved.
-      initialSnapshot = JSON.stringify({ ...JSON.parse(initialSnapshot), backgroundImage: dataUrl });
+      initialSnapshot = JSON.stringify({
+        ...JSON.parse(initialSnapshot),
+        backgroundImage: dataUrl,
+        backgroundVideoId: undefined,
+      });
       const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
       if (preview) {
+        clearPreviewVideo(preview);
         preview.style.backgroundImage = `url(${JSON.stringify(dataUrl)})`;
         preview.textContent = '';
       }
@@ -832,7 +928,11 @@ async function render(page: HTMLElement): Promise<void> {
       fileEl.value = '';
       return;
     }
-    const created = await createUserTheme(name, { ...draft, backgroundImage: dataUrl });
+    const created = await createUserTheme(name, {
+      ...draft,
+      backgroundImage: dataUrl,
+      backgroundVideoId: undefined,
+    });
     await setSettings(activationPatch(created.id));
     setPreviewTheme(null);
     setBackgroundImagePreview(null);
@@ -840,19 +940,26 @@ async function render(page: HTMLElement): Promise<void> {
     await render(page);
   });
 
-  // Background image remove — instant commit to the active preset. Built-ins
-  // never have an image to remove, so the button is disabled in that case
-  // (see the `disabled` attribute in the markup above).
+  // Background remove — instant commit to the active preset; clears image and
+  // video. Built-ins never have a background to remove, so the button is
+  // disabled in that case (see the `disabled` attribute in the markup above).
   page.querySelector('[data-action="remove-bg"]')?.addEventListener('click', async () => {
     if (!activeEntry) return;
     await removeCustomThemeBackground();
     draft.backgroundImage = undefined;
+    draft.backgroundVideoId = undefined;
     custom.backgroundImage = undefined;
-    initialSnapshot = JSON.stringify({ ...JSON.parse(initialSnapshot), backgroundImage: undefined });
+    custom.backgroundVideoId = undefined;
+    initialSnapshot = JSON.stringify({
+      ...JSON.parse(initialSnapshot),
+      backgroundImage: undefined,
+      backgroundVideoId: undefined,
+    });
     const preview = page.querySelector<HTMLElement>('.bp-bg-preview');
     if (preview) {
+      clearPreviewVideo(preview);
       preview.style.backgroundImage = '';
-      preview.textContent = 'No background image set';
+      preview.textContent = 'No background set';
     }
     page.querySelector<HTMLButtonElement>('[data-action="remove-bg"]')?.setAttribute('disabled', 'true');
     const swatch = page.querySelector<HTMLElement>(
@@ -863,7 +970,7 @@ async function render(page: HTMLElement): Promise<void> {
       swatch.style.backgroundImage = '';
     }
     markDirty();
-    setStatus(`Image removed from "${activeEntry.name}".`);
+    setStatus(`Background removed from "${activeEntry.name}".`);
   });
 
   // Brightness — preview live while dragging, commit on Apply.
@@ -874,7 +981,19 @@ async function render(page: HTMLElement): Promise<void> {
     if (brightnessReadout) brightnessReadout.textContent = `${v}%`;
     setBackgroundBrightnessPreview(v);
     draft.backgroundBrightness = v;
-    markDirty();
+    updateDirtyBar();
+  });
+
+  // Video volume — preview live while dragging, commit on Apply (shown only
+  // for video backgrounds). Default 0 (muted); auto-muted on window blur.
+  const volumeEl = page.querySelector<HTMLInputElement>('[data-bg-volume]');
+  const volumeReadout = page.querySelector<HTMLElement>('[data-bg-volume-readout]');
+  volumeEl?.addEventListener('input', () => {
+    const v = clampVolumeForUI(Number(volumeEl.value));
+    if (volumeReadout) volumeReadout.textContent = `${v}%`;
+    setBackgroundVolumePreview(v);
+    draft.backgroundVideoVolume = v;
+    updateDirtyBar();
   });
 
   // Layout mode.
@@ -1047,9 +1166,91 @@ function formatBytes(bytes: number): string {
   return `${Math.ceil(bytes / 1024)} KB`;
 }
 
+/** Removes any preview <video> from the box and revokes its object URL. */
+function clearPreviewVideo(preview: HTMLElement): void {
+  const existing = preview.querySelector<HTMLVideoElement>('video.bp-bg-preview-video');
+  if (existing) {
+    const url = existing.dataset.objurl;
+    if (url) URL.revokeObjectURL(url);
+    existing.remove();
+  }
+}
+
+/** Mounts a muted looping preview <video> for a stored video id into the box. */
+async function mountPreviewVideo(preview: HTMLElement, videoId: string): Promise<void> {
+  const blob = await getVideo(videoId);
+  if (!blob) return;
+  clearPreviewVideo(preview);
+  preview.textContent = '';
+  const url = URL.createObjectURL(blob);
+  const v = document.createElement('video');
+  v.className = 'bp-bg-preview-video';
+  v.autoplay = true;
+  v.loop = true;
+  v.muted = true;
+  v.playsInline = true;
+  v.setAttribute('playsinline', '');
+  v.src = url;
+  v.dataset.objurl = url;
+  v.style.cssText =
+    'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit;';
+  // The preview box is positioned in CSS; ensure the video sits inside it.
+  if (getComputedStyle(preview).position === 'static') preview.style.position = 'relative';
+  preview.appendChild(v);
+  void v.play().catch(() => {});
+}
+
+/**
+ * Best-effort first-frame capture for a video file → PNG data URL, used as the
+ * theme's poster so the overlay shows something before the blob loads. Returns
+ * `undefined` if the browser can't decode/seek the file. Capped to a modest
+ * size so the poster doesn't bloat `chrome.storage`.
+ */
+function captureVideoPoster(file: File): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    let done = false;
+    const finish = (result: string | undefined) => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      resolve(result);
+    };
+    v.muted = true;
+    v.playsInline = true;
+    v.preload = 'metadata';
+    v.src = url;
+    v.onloadeddata = () => {
+      try {
+        const vw = v.videoWidth || 1280;
+        const vh = v.videoHeight || 720;
+        const scale = Math.min(1, 1280 / vw);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(vw * scale);
+        canvas.height = Math.round(vh * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return finish(undefined);
+        ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+        finish(canvas.toDataURL('image/jpeg', 0.7));
+      } catch {
+        finish(undefined);
+      }
+    };
+    v.onerror = () => finish(undefined);
+    // Safety timeout so a stuck decode never hangs the upload flow.
+    setTimeout(() => finish(undefined), 4000);
+  });
+}
+
 function clampBrightnessForUI(v: number | undefined): number {
   if (typeof v !== 'number' || !Number.isFinite(v)) return 100;
   return Math.max(0, Math.min(200, Math.round(v)));
+}
+
+function clampVolumeForUI(v: number | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(100, Math.round(v)));
 }
 
 function normalizeColor(v: string): string {

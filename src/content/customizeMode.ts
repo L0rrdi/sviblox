@@ -48,6 +48,9 @@ let active = false;
 let forcedActive = false;
 let selectedId: string | null = null;
 let pendingCustomIconDataUrl = '';
+// In-progress "Open in a new tab" choice for the Add-custom-button form, kept
+// across re-renders (icon upload / validation errors) like the pending icon.
+let pendingCustomNewTab = false;
 let iconColorToolsForId: string | null = null;
 let lastIconTintColor = '#4a90e2';
 // Mirrored from Settings.customizeShowHiddenInMode so renderDrawer can read
@@ -137,6 +140,7 @@ function exitMode(): void {
   // Without this, exiting after uploading but before clicking Add leaves
   // the next entry still showing "Uploaded image ready" with the old image.
   pendingCustomIconDataUrl = '';
+  pendingCustomNewTab = false;
   iconColorToolsForId = null;
   document.body.classList.remove(BODY_CLASS);
   document.removeEventListener('click', clickInterceptor, true);
@@ -173,6 +177,7 @@ function setSelectedId(id: string | null): void {
   if (selectedId === id) return;
   selectedId = id;
   pendingCustomIconDataUrl = '';
+  pendingCustomNewTab = false;
   iconColorToolsForId = null;
   // Switching to edit an existing item collapses the add-button form so the
   // editor takes the visual focus. The form re-opens itself if the user
@@ -258,7 +263,7 @@ function renderDrawer(): void {
     <div class="bp-cust-drawer-body">
       ${renderAddButtonForm()}
       <div data-bp-list-host>${renderActiveList(spec)}</div>
-      <div data-bp-editor-host>${selected ? renderSelected(selected.edit, labelText, selectedIconUrl, selectedIconPreset) : renderEmpty()}</div>
+      <div data-bp-editor-host>${selected ? renderSelected(selected.edit, labelText, selectedIconUrl, selectedIconPreset, Boolean(selectedCustomButton?.openInNewTab)) : renderEmpty()}</div>
     </div>
     <footer class="bp-cust-drawer-footer">
       <div class="bp-cust-counts">${entryCount} customization${entryCount === 1 ? '' : 's'} active</div>
@@ -335,6 +340,10 @@ function renderAddButtonForm(): string {
         <label class="bp-cust-field">
           <span>Image URL</span>
           <input type="url" data-field="newIconUrl" placeholder="...or upload an image" value="${escapeAttr(pendingCustomIconDataUrl.startsWith('data:') ? '' : pendingCustomIconDataUrl)}" />
+        </label>
+        <label class="bp-cust-field bp-cust-field-inline">
+          <input type="checkbox" data-field="newOpenInNewTab" ${pendingCustomNewTab ? 'checked' : ''} />
+          <span>Open in a new tab</span>
         </label>
         <div class="bp-cust-add-actions">
           <input type="file" accept="image/*" data-field="newIconFile" hidden />
@@ -641,7 +650,7 @@ function chipClass(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 }
 
-function renderSelected(edit: ElementEdit, currentLabel: string, currentIconUrl: string, currentIconPreset: string | undefined): string {
+function renderSelected(edit: ElementEdit, currentLabel: string, currentIconUrl: string, currentIconPreset: string | undefined, openInNewTab: boolean): string {
   const hasAnimatedIcon = isAnimatedIconPresetId(currentIconPreset);
   const hasIcon = Boolean(currentIconUrl || hasAnimatedIcon);
   const isCustomButton = selectedId?.startsWith('leftnav::custom-button-');
@@ -663,6 +672,11 @@ function renderSelected(edit: ElementEdit, currentLabel: string, currentIconUrl:
       <input type="checkbox" data-field="hidden" ${edit.hidden ? 'checked' : ''} />
       <span>Hide this item</span>
     </label>
+    ${isCustomButton ? `
+    <label class="bp-cust-field bp-cust-field-inline">
+      <input type="checkbox" data-field="openInNewTab" ${openInNewTab ? 'checked' : ''} />
+      <span>Open in a new tab</span>
+    </label>` : ''}
 
     <fieldset class="bp-cust-icon-group">
       <legend>Custom icon</legend>
@@ -732,6 +746,11 @@ function bindDrawerEvents(drawer: HTMLElement): void {
       }
     });
   }
+  // Persist the "Open in a new tab" choice so an icon upload / validation
+  // re-render of the add form doesn't reset it before the user clicks Add.
+  drawer.querySelector<HTMLInputElement>('[data-field="newOpenInNewTab"]')?.addEventListener('change', (e) => {
+    pendingCustomNewTab = (e.target as HTMLInputElement).checked;
+  });
   drawer.querySelector('[data-action="new-icon-upload"]')?.addEventListener('click', () => {
     drawer.querySelector<HTMLInputElement>('[data-field="newIconFile"]')?.click();
   });
@@ -808,6 +827,15 @@ function bindDrawerEvents(drawer: HTMLElement): void {
   const hiddenInput = drawer.querySelector<HTMLInputElement>('[data-field="hidden"]');
   hiddenInput?.addEventListener('change', () => {
     void writeEdit({ hidden: hiddenInput.checked });
+  });
+  // Custom-button-only: open the URL in a new tab instead of the current one.
+  const newTabInput = drawer.querySelector<HTMLInputElement>('[data-field="openInNewTab"]');
+  newTabInput?.addEventListener('change', () => {
+    if (!selectedId?.startsWith('leftnav::custom-button-')) return;
+    const id = selectedId.replace('leftnav::custom-button-', '');
+    // Pass `undefined` when off so the cleanup pass in updateCustomButton
+    // drops the key (absence = same-tab default), `true` when on.
+    void updateCustomButton(id, { openInNewTab: newTabInput.checked || undefined });
   });
   const presetInput = drawer.querySelector<HTMLSelectElement>('[data-field="iconPreset"]');
   presetInput?.addEventListener('change', () => {
@@ -886,8 +914,10 @@ async function handleAddCustomButton(drawer: HTMLElement): Promise<void> {
     iconDataUrl: explicitIcon,
     originalIconDataUrl: explicitIcon, // stash for future "Revert tint" — see CM4
     iconPreset: explicitIcon ? undefined : iconPreset || undefined,
+    openInNewTab: pendingCustomNewTab || undefined,
   });
   pendingCustomIconDataUrl = '';
+  pendingCustomNewTab = false;
   addFormError = '';
   addFormOpen = false;
   setSelectedId(`leftnav::custom-button-${button.id}`);

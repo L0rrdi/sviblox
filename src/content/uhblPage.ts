@@ -12,8 +12,8 @@ import { loadUhblSheet, refreshUhblSheet, syncUhblMediaViaTab } from '@/api/uhbl
 import { getBadgeDetail, getUserBadgeAwardedDates } from '@/api/badges';
 import { getBadgeIcons, getPlaceIcons } from '@/api/thumbnails';
 import { getAuthenticatedUserId } from '@/api/users';
-import { UhblBadge, UhblTier } from '@/types';
-import { getSettings } from '@/storage/settingsStore';
+import { Settings, UhblBadge, UhblTier } from '@/types';
+import { getSettings, onSettingsChanged, setSettings } from '@/storage/settingsStore';
 import { escapeHtml, escapeAttr } from '@/util/html';
 
 const PAGE_ID = 'bloxplus-uhbl-page';
@@ -104,8 +104,8 @@ function findHomeContentHost(): HTMLElement | null {
   return main instanceof HTMLElement ? main : null;
 }
 
-const SIBLING_OVERLAY_IDS = ['bloxplus-themes-page'];
-const OVERLAY_HASHES = ['bloxplus-themes', 'bloxplus-uhbl'];
+const SIBLING_OVERLAY_IDS = ['bloxplus-themes-page', 'bloxplus-badgerhub-page'];
+const OVERLAY_HASHES = ['bloxplus-themes', 'bloxplus-uhbl', 'bloxplus-badgerhub'];
 
 function hideHomeContent(host: HTMLElement): void {
   for (const child of host.children) {
@@ -523,7 +523,18 @@ function renderSkeleton(page: HTMLElement): void {
         <span data-uhbl-meta>Loading...</span>
         <button class="bp-uhbl-btn" data-action="refresh">Refresh</button>
         <button class="bp-uhbl-btn" data-action="sync-videos" title="Open the source sheet in a hidden tab and scrape video URLs that aren't in the bootstrap window. Adds higher-tier videos. ~15s.">Sync videos</button>
+        <button class="bp-uhbl-btn" data-action="settings" aria-expanded="false">Settings</button>
+        <a class="bp-uhbl-btn" href="#bloxplus-badgerhub" title="Legacy badger games — a UHBL-style list, one per game.">Badger Hub: Legacy</a>
         <a class="bp-uhbl-btn bp-uhbl-btn-ghost" href="https://docs.google.com/spreadsheets/d/17HE0xTN5tuq8BAkwvtP17tlJW8rpFNI3WzbI4LYXchk/htmlview" target="_blank" rel="noopener">Open source sheet</a>
+      </div>
+      <div class="bp-uhbl-settings-panel" data-uhbl-settings hidden>
+        <div class="bp-uhbl-settings-row">
+          <span>Background</span>
+          <div class="bp-uhbl-segmented" role="group" aria-label="UHBL and Badger Hub background">
+            <button type="button" data-bg-mode="transparent">Transparent</button>
+            <button type="button" data-bg-mode="solid">Solid</button>
+          </div>
+        </div>
       </div>
       <div class="bp-uhbl-progress" data-uhbl-progress style="display:none"></div>
     </header>
@@ -548,6 +559,8 @@ function renderSkeleton(page: HTMLElement): void {
     </div>
     <div class="bp-uhbl-groups" data-uhbl-groups></div>
   `;
+  bindSettingsControls(page);
+  void getSettings().then((settings) => applyDisplaySettings(page, settings));
   bindFilterControls(page);
 
   page.querySelector('[data-action="refresh"]')?.addEventListener('click', () => {
@@ -592,6 +605,41 @@ async function runSyncVideos(page: HTMLElement, btn: HTMLButtonElement): Promise
       btn.disabled = false;
       btn.textContent = originalText;
     }, 4000);
+  }
+}
+
+function normalizeBackgroundMode(mode: unknown): Settings['uhblOverlayBackground'] {
+  return mode === 'solid' ? 'solid' : 'transparent';
+}
+
+function applyDisplaySettings(page: HTMLElement, settings: Settings): void {
+  const mode = normalizeBackgroundMode(settings.uhblOverlayBackground);
+  page.classList.toggle('bp-uhbl-bg-solid', mode === 'solid');
+  page.classList.toggle('bp-uhbl-bg-transparent', mode === 'transparent');
+  for (const btn of page.querySelectorAll<HTMLButtonElement>('[data-bg-mode]')) {
+    const active = btn.dataset.bgMode === mode;
+    btn.classList.toggle('bp-uhbl-segmented-active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  }
+}
+
+function bindSettingsControls(page: HTMLElement): void {
+  const settingsBtn = page.querySelector<HTMLButtonElement>('[data-action="settings"]');
+  const panel = page.querySelector<HTMLElement>('[data-uhbl-settings]');
+  settingsBtn?.addEventListener('click', () => {
+    if (!panel) return;
+    const nextHidden = !panel.hidden;
+    panel.hidden = nextHidden;
+    settingsBtn.setAttribute('aria-expanded', String(!nextHidden));
+  });
+
+  for (const btn of page.querySelectorAll<HTMLButtonElement>('[data-bg-mode]')) {
+    btn.addEventListener('click', () => {
+      const mode = normalizeBackgroundMode(btn.dataset.bgMode);
+      void setSettings({ uhblOverlayBackground: mode }).then((settings) => {
+        if (page.isConnected) applyDisplaySettings(page, settings);
+      });
+    });
   }
 }
 
@@ -936,6 +984,33 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-uhbl-btn:hover { background: rgba(255,255,255,0.12); }
     #${PAGE_ID} .bp-uhbl-btn-ghost { opacity: 0.85; }
+    #${PAGE_ID} .bp-uhbl-settings-panel {
+      width: min(100%, 420px);
+      margin: -8px 0 18px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.045);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+    #${PAGE_ID} .bp-uhbl-settings-row {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      font-size: 12px; font-weight: 600;
+    }
+    #${PAGE_ID} .bp-uhbl-segmented {
+      display: inline-grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 2px; padding: 2px; border-radius: 6px;
+      background: rgba(0,0,0,0.24);
+      border: 1px solid rgba(255,255,255,0.10);
+    }
+    #${PAGE_ID} .bp-uhbl-segmented button {
+      min-width: 96px; padding: 5px 9px; border: 0; border-radius: 4px;
+      background: transparent; color: inherit; cursor: pointer;
+      font-size: 12px; font-weight: 600;
+    }
+    #${PAGE_ID} .bp-uhbl-segmented button:hover { background: rgba(255,255,255,0.08); }
+    #${PAGE_ID} .bp-uhbl-segmented button.bp-uhbl-segmented-active {
+      background: #335fff; color: #fff;
+    }
 
     #${PAGE_ID} .bp-uhbl-progress {
       margin: 4px 0 22px 0;
@@ -1205,6 +1280,29 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-uhbl-empty {
       text-align: center; padding: 24px; opacity: 0.6; font-size: 13px;
     }
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-settings-panel,
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-filters,
+    #${PAGE_ID}.bp-uhbl-bg-solid details.bp-uhbl-tier,
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-row {
+      background: var(--bp-nav, #191a1f);
+      border-color: rgba(255,255,255,0.14);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-progress {
+      background: var(--bp-nav, #191a1f);
+      border-color: rgba(255,82,143,0.42);
+    }
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-thumb,
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-segmented {
+      background: #222733;
+    }
+    #${PAGE_ID}.bp-uhbl-bg-solid .bp-uhbl-row[data-owned-state="owned"] {
+      background-color: var(--bp-nav, #191a1f);
+      background-image: linear-gradient(90deg, rgba(46,178,76,0.34), rgba(46,178,76,0.18));
+      border-color: rgba(46,178,76,0.62);
+      box-shadow: inset 3px 0 0 0 rgba(46,178,76,0.9);
+    }
   `;
   document.head.appendChild(style);
 }
@@ -1217,6 +1315,10 @@ export function install(): void {
   window.addEventListener('popstate', () => run());
   window.addEventListener('scroll', () => updateFixedFilters(), { passive: true });
   window.addEventListener('resize', () => updateFixedFilters());
+  onSettingsChanged((settings) => {
+    const page = document.getElementById(PAGE_ID);
+    if (page instanceof HTMLElement) applyDisplaySettings(page, settings);
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (!isUhblRoute()) return;

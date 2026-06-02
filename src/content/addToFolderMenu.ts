@@ -1,11 +1,18 @@
 /**
  * Reusable popover anchored to a trigger element. Lists existing folders +
- * "New folder...". Picking a folder calls addGameToFolder; picking "New
- * folder..." prompts the user for a name and creates one. Used both by the
- * game-page "Add to folder" button and the per-tile (+) button on home tiles.
+ * "New folder...". Picking a folder toggles membership: add if absent,
+ * remove if already present. Picking "New folder..." prompts the user for a
+ * name and creates one. Used both by the game-page "Add to folder" button and
+ * the per-tile (+) button on home tiles.
  */
 
-import { addGameToFolder, createFolder, getFolders, FolderGame } from '@/storage/foldersStore';
+import {
+  addGameToFolder,
+  createFolder,
+  getFolders,
+  FolderGame,
+  removeGameFromFolder,
+} from '@/storage/foldersStore';
 import { escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-folder-menu-style';
@@ -17,6 +24,7 @@ export interface OpenMenuOpts {
   anchor: HTMLElement;
   game: FolderGame;
   onAdded?: (folderName: string) => void;
+  onRemoved?: (folderName: string) => void;
 }
 
 let outsideHandlerAttached = false;
@@ -41,7 +49,8 @@ export async function openFolderMenu(opts: OpenMenuOpts): Promise<void> {
       const has = f.games.some((g) => g.universeId === opts.game.universeId);
       lines.push(
         `<button type="button" class="bp-folder-menu-item${has ? ' bp-folder-menu-item-has' : ''}"
-                 data-folder-id="${f.id}" ${has ? 'disabled' : ''}>
+                 data-folder-id="${f.id}" data-folder-has="${has ? '1' : '0'}"
+                 aria-label="${has ? 'Remove from' : 'Add to'} ${escapeHtml(f.name)}">
            <span class="bp-folder-menu-icon">${has ? '✓' : '+'}</span>
            <span class="bp-folder-menu-name">${escapeHtml(f.name)}</span>
            <span class="bp-folder-menu-count">${f.games.length}</span>
@@ -63,10 +72,15 @@ export async function openFolderMenu(opts: OpenMenuOpts): Promise<void> {
   for (const el of menu.querySelectorAll<HTMLButtonElement>('[data-folder-id]')) {
     el.addEventListener('click', async () => {
       const id = el.dataset.folderId!;
-      await addGameToFolder(id, opts.game);
       const folderName =
         state.folders.find((f) => f.id === id)?.name ?? 'folder';
-      opts.onAdded?.(folderName);
+      if (el.dataset.folderHas === '1') {
+        await removeGameFromFolder(id, opts.game.universeId);
+        opts.onRemoved?.(folderName);
+      } else {
+        await addGameToFolder(id, opts.game);
+        opts.onAdded?.(folderName);
+      }
       closeMenu();
     });
   }
@@ -138,8 +152,8 @@ function ensureStyle(): void {
       text-align: left; border-radius: 6px;
       cursor: pointer; font: inherit;
     }
-    .bp-folder-menu-item:hover:not([disabled]) { background: rgba(255,255,255,0.08); }
-    .bp-folder-menu-item[disabled] { opacity: 0.55; cursor: default; }
+    .bp-folder-menu-item:hover { background: rgba(255,255,255,0.08); }
+    .bp-folder-menu-item-has { color: #b5f0c8; }
     .bp-folder-menu-icon { width: 16px; text-align: center; opacity: 0.85; }
     .bp-folder-menu-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .bp-folder-menu-count { font-size: 11px; opacity: 0.55; }

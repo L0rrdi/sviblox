@@ -1,5 +1,6 @@
 import { CustomTheme, UserThemeEntry } from '@/types';
 import { getSettings, setSettings } from './settingsStore';
+import { deleteVideo } from './videoStore';
 
 const LEGACY_KEY = 'bloxplus.customTheme';
 const LIST_KEY = 'bloxplus.userThemes';
@@ -77,19 +78,63 @@ export async function setCustomTheme(patch: Partial<CustomTheme>): Promise<Custo
   return next;
 }
 
+/**
+ * Sets a still background image on the active user preset. A still image and a
+ * video are mutually exclusive on the overlay (video wins), so this also clears
+ * any `backgroundVideoId` and deletes the orphaned blob from IndexedDB.
+ */
 export async function setCustomThemeBackground(backgroundImage: string): Promise<CustomTheme> {
-  return setCustomTheme({ backgroundImage });
+  const settings = await getSettings();
+  const state = await getUserThemes();
+  const entry = state.entries[settings.themeId];
+  if (!entry) return {};
+  const prevVideoId = entry.theme.backgroundVideoId;
+  const next: CustomTheme = { ...entry.theme, backgroundImage };
+  delete next.backgroundVideoId;
+  state.entries[settings.themeId] = { ...entry, theme: next };
+  await writeUserThemes(state);
+  if (prevVideoId) void deleteVideo(prevVideoId);
+  return next;
 }
 
+/**
+ * Sets a video background on the active user preset. `videoId` references a
+ * blob already written to the IndexedDB video store; `poster` (optional) is a
+ * still first-frame data URL used as `backgroundImage` so the overlay shows
+ * something before the blob finishes loading. Deletes any previously-referenced
+ * video blob. No-op (returns `{}`) when the active theme is a built-in preset.
+ */
+export async function setCustomThemeVideo(
+  videoId: string,
+  poster?: string
+): Promise<CustomTheme> {
+  const settings = await getSettings();
+  const state = await getUserThemes();
+  const entry = state.entries[settings.themeId];
+  if (!entry) return {};
+  const prevVideoId = entry.theme.backgroundVideoId;
+  const next: CustomTheme = { ...entry.theme, backgroundVideoId: videoId };
+  if (poster) next.backgroundImage = poster;
+  else delete next.backgroundImage;
+  state.entries[settings.themeId] = { ...entry, theme: next };
+  await writeUserThemes(state);
+  if (prevVideoId && prevVideoId !== videoId) void deleteVideo(prevVideoId);
+  return next;
+}
+
+/** Removes the background (image and/or video) from the active user preset. */
 export async function removeCustomThemeBackground(): Promise<CustomTheme> {
   const settings = await getSettings();
   const state = await getUserThemes();
   const entry = state.entries[settings.themeId];
   if (!entry) return {};
+  const prevVideoId = entry.theme.backgroundVideoId;
   const next: CustomTheme = { ...entry.theme };
   delete next.backgroundImage;
+  delete next.backgroundVideoId;
   state.entries[settings.themeId] = { ...entry, theme: next };
   await writeUserThemes(state);
+  if (prevVideoId) void deleteVideo(prevVideoId);
   return next;
 }
 
@@ -103,8 +148,10 @@ export async function clearCustomTheme(): Promise<void> {
   const state = await getUserThemes();
   const entry = state.entries[settings.themeId];
   if (!entry) return;
+  const prevVideoId = entry.theme.backgroundVideoId;
   state.entries[settings.themeId] = { ...entry, theme: {} };
   await writeUserThemes(state);
+  if (prevVideoId) void deleteVideo(prevVideoId);
 }
 
 // ── Multi-preset management ────────────────────────────────────────────────
@@ -155,10 +202,13 @@ export async function renameUserTheme(id: string, name: string): Promise<void> {
  */
 export async function deleteUserTheme(id: string): Promise<void> {
   const state = await getUserThemes();
-  if (!state.entries[id]) return;
+  const entry = state.entries[id];
+  if (!entry) return;
+  const videoId = entry.theme.backgroundVideoId;
   delete state.entries[id];
   state.order = state.order.filter((x) => x !== id);
   await writeUserThemes(state);
+  if (videoId) void deleteVideo(videoId);
   const settings = await getSettings();
   if (settings.themeId === id) {
     await setSettings({ themeId: 'default' });
@@ -178,8 +228,13 @@ export async function overwriteUserTheme(
   const state = await getUserThemes();
   const entry = state.entries[id];
   if (!entry) return;
+  const prevVideoId = entry.theme.backgroundVideoId;
   state.entries[id] = { ...entry, theme };
   await writeUserThemes(state);
+  // If the overwrite dropped/replaced the video, free the old blob.
+  if (prevVideoId && prevVideoId !== theme.backgroundVideoId) {
+    void deleteVideo(prevVideoId);
+  }
 }
 
 // ── Change listeners ──────────────────────────────────────────────────────

@@ -232,6 +232,33 @@ function ensureStyle(): void {
       84%      { transform: translate(-1px, -0.5px); }
       85%      { transform: translate(0, 0); }
     }
+    /* Party popper: confetti bursts up-and-right (scale + fade) on a loop, the
+     * popper cone/star recoils. Source: itshover.com party-popper-icon (Lucide
+     * + Framer Motion). overflow:visible lets the confetti fly past the 24x24
+     * viewBox like the source's style={{ overflow: 'visible' }}. */
+    .bp-animated-nav-icon-party-popper {
+      overflow: visible;
+    }
+    .bp-animated-party-popper-popper,
+    .bp-animated-party-popper-confetti {
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+    a:hover .bp-animated-party-popper-confetti {
+      animation: bp-party-confetti 0.7s ease-out infinite;
+    }
+    a:hover .bp-animated-party-popper-popper {
+      animation: bp-party-popper-recoil 0.7s ease-out infinite;
+    }
+    @keyframes bp-party-confetti {
+      0%   { transform: translate(0, 0) scale(1); opacity: 1; }
+      60%  { transform: translate(5px, -5px) scale(1.15); opacity: 1; }
+      100% { transform: translate(8px, -8px) scale(0.8); opacity: 0; }
+    }
+    @keyframes bp-party-popper-recoil {
+      0%, 100% { transform: translate(0, 0); }
+      25%      { transform: translate(-3px, 3px); }
+    }
   `;
   document.head.appendChild(style);
 }
@@ -358,6 +385,16 @@ function hydrateCustomButton(li: HTMLElement, button: CustomButton): void {
   }
   if (anchor.getAttribute('href') !== button.url) anchor.setAttribute('href', button.url);
   if (anchor.getAttribute('aria-label') !== button.label) anchor.setAttribute('aria-label', button.label);
+  // Open-in-new-tab toggle: a plain anchor `target="_blank"` so a normal
+  // (non-customize-mode) click opens a new browser tab. `rel` hardens it
+  // against tabnabbing for external URLs.
+  if (button.openInNewTab) {
+    anchor.setAttribute('target', '_blank');
+    anchor.setAttribute('rel', 'noopener noreferrer');
+  } else {
+    anchor.removeAttribute('target');
+    anchor.removeAttribute('rel');
+  }
 
   let label = anchor.querySelector<HTMLSpanElement>(':scope > span.text-truncate-end.text-no-wrap:not(.bp-nav-icon)');
   const iconNodes = [...anchor.querySelectorAll<Element>(':scope > .bp-cust-icon, :scope > .bp-nav-icon, :scope > .bp-animated-nav-icon')];

@@ -10,6 +10,7 @@ import * as themeScheduler from './themeScheduler';
 import * as leftNavEnhancer from './leftNavEnhancer';
 import * as themesPage from './themesPage';
 import * as uhblPage from './uhblPage';
+import * as badgerHubPage from './badgerHubPage';
 import * as searchAutocomplete from './searchAutocomplete';
 import * as addToFolderButton from './addToFolderButton';
 import * as gamePlaytimeButton from './gamePlaytimeButton';
@@ -35,6 +36,7 @@ import { install as installBannedProfileTrap } from './bannedProfileTrap';
 
 themesPage.install();
 uhblPage.install();
+badgerHubPage.install();
 customizeMode.install();
 customizeMenuEntry.install();
 // Always-on click listener that stashes any clicked /users/{id}/profile
@@ -75,6 +77,7 @@ function dispatch(): void {
   leftNavEnhancer.run();
   themesPage.run();
   uhblPage.run();
+  badgerHubPage.run();
   customizeApplier.run();
   customizeMode.run();
   customizeMenuEntry.run();

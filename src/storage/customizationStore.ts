@@ -46,6 +46,9 @@ export interface CustomButton {
   /** See ElementEdit.originalIconDataUrl. */
   originalIconDataUrl?: string;
   iconPreset?: string;
+  /** When true, clicking opens the URL in a new browser tab instead of
+   *  navigating the current Roblox tab. Default (undefined/false) = same tab. */
+  openInNewTab?: boolean;
 }
 
 export interface CustomizationSpec {

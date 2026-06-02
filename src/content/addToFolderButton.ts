@@ -68,6 +68,7 @@ export async function run(): Promise<void> {
       anchor: btn,
       game: { universeId: ctx.universeId, placeId: ctx.placeId, name: ctx.name },
       onAdded: () => flashLabel(btn, 'Added'),
+      onRemoved: () => flashLabel(btn, 'Removed'),
     });
   });
 

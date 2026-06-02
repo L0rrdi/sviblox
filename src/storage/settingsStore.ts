@@ -11,6 +11,9 @@ export async function getSettings(): Promise<Settings> {
   if (!validRates.includes(merged.robuxCashRate)) {
     merged.robuxCashRate = DEFAULT_SETTINGS.robuxCashRate;
   }
+  if (!['transparent', 'solid'].includes(merged.uhblOverlayBackground)) {
+    merged.uhblOverlayBackground = DEFAULT_SETTINGS.uhblOverlayBackground;
+  }
   return merged;
 }
 

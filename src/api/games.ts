@@ -17,6 +17,7 @@ export interface GameInfo {
   name: string;
   rootPlaceId: number;
   playing?: number;
+  visits?: number;
   creator?: { id: number; name: string; type: string };
 }
 

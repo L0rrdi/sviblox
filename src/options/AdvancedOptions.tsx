@@ -325,11 +325,21 @@ const LOCAL_KEY_LABELS: Record<string, string> = {
   'bloxplus.uhbl.sheet': 'UHBL sheet snapshot',
   'bloxplus.uhbl.mediaMap': 'UHBL video URL map (accumulated across refreshes)',
   'bloxplus.uhbl.mediaMeta': 'UHBL media-fetch metadata',
+  'bloxplus.badgerhub.hub': 'Badger Hub sheet snapshot',
+  'bloxplus.badgerhub.progress': 'Badger Hub owned progress',
+  'bloxplus.badgerhub.knownOwned': 'Badger Hub unlock baseline',
+  'bloxplus.badgerhub.gamebadges': 'Badger Hub saved badge lists',
   'bloxplus.lastPreImportBackup': 'Pre-import restore backup (legacy)',
   'bloxplus.preImportBackups': `Pre-import restore history (last ${PRE_IMPORT_BACKUP_MAX})`,
 };
 
 const CACHE_PREFIX = 'bloxplus.cache.';
+const BADGER_HUB_LOCAL_KEYS = [
+  'bloxplus.badgerhub.hub',
+  'bloxplus.badgerhub.progress',
+  'bloxplus.badgerhub.knownOwned',
+  'bloxplus.badgerhub.gamebadges',
+];
 
 interface KeyUsage {
   key: string;
@@ -426,6 +436,11 @@ function StorageManager() {
       'bloxplus.uhbl.mediaMap',
       'bloxplus.uhbl.mediaMeta',
     ]);
+  });
+
+  const dropBadgerHub = (): Promise<void> => runAction('Badger Hub data dropped', async () => {
+    if (!confirm('Drop saved Badger Hub sheet data, badge lists, progress, and unlock baseline? It will be rebuilt as you load/update Badger Hub again.')) return ACTION_CANCELLED;
+    await chrome.storage.local.remove(BADGER_HUB_LOCAL_KEYS);
   });
 
   const dropLastSeen = (): Promise<void> => runAction('Last-seen snapshots dropped', async () => {
@@ -564,6 +579,9 @@ function StorageManager() {
           </button>
           <button className="adv-secondary" onClick={() => void dropUhbl()} disabled={busy}>
             Drop UHBL snapshot
+          </button>
+          <button className="adv-secondary" onClick={() => void dropBadgerHub()} disabled={busy}>
+            Drop Badger Hub data
           </button>
           <button className="adv-secondary" onClick={() => void dropLastSeen()} disabled={busy}>
             Drop last-seen snapshots

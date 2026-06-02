@@ -4,6 +4,7 @@ interface FetchOptions {
   cacheKey?: string;
   cacheTtlMs?: number;
   retries?: number;
+  forceRefresh?: boolean;
 }
 
 const inflight = new Map<string, Promise<unknown>>();
@@ -19,9 +20,9 @@ export class RobloxHttpError extends Error {
 }
 
 export async function robloxFetch<T>(url: string, opts: FetchOptions = {}): Promise<T> {
-  const { cacheKey, cacheTtlMs = 60_000, retries = 3 } = opts;
+  const { cacheKey, cacheTtlMs = 60_000, retries = 3, forceRefresh = false } = opts;
 
-  if (cacheKey) {
+  if (cacheKey && !forceRefresh) {
     const cached = await cacheGet<T>(cacheKey);
     if (cached !== null) return cached;
   }

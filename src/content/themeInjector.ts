@@ -1,5 +1,6 @@
 import { getSettings, onSettingsChanged } from '@/storage/settingsStore';
 import { getCustomTheme, onCustomThemeChanged } from '@/storage/themeStore';
+import { getVideo } from '@/storage/videoStore';
 import { CustomTheme } from '@/types';
 
 const STYLE_ID = 'bloxplus-theme-style';
@@ -3115,11 +3116,36 @@ function get2016OverlayCss(): string {
   `;
 }
 
+// ── Background overlay state (still image OR animated video) ───────────────
+// The overlay is a single fixed `z-index:-1` div. A still background paints
+// directly onto it via `background-image`; a video background appends a
+// `<video>` child that fills it. Only one is active at a time.
+let bgVideoEl: HTMLVideoElement | null = null;
+let bgVideoUrl: string | null = null; // object URL currently assigned to the <video>
+let bgVideoId: string | null = null; // IndexedDB id of the loaded video
+let bgVideoSeq = 0; // invalidates in-flight async blob loads on swap/teardown
+let bgVisibilityHooked = false;
+let bgVolume = 0; // desired video audio volume 0–100 (0 = muted), from the active theme
+let bgWindowBlurred = false; // browser window currently unfocused → force-mute
+let bgWindowAudioHooked = false;
+let bgGestureUnmuteHooked = false;
+// Live preview overrides set by the Themes-page sliders while editing. When
+// non-null they take precedence over the stored theme value, so a router-driven
+// `applyCurrent()` (which reads stored values) can't clobber an in-progress drag.
+// Cleared when the edit ends (`clearBackgroundPreviewOverrides`).
+let previewBrightness: number | null = null;
+let previewVolume: number | null = null;
+
 function applyBackgroundImage(custom: CustomTheme, themeId: string): void {
-  const url = themeId === 'custom' ? custom.backgroundImage : undefined;
-  document.body.classList.toggle('bp-has-bg-image', !!url);
+  const isCustom = themeId === 'custom';
+  const videoId = isCustom ? custom.backgroundVideoId : undefined;
+  const imageUrl = isCustom ? custom.backgroundImage : undefined;
+  const hasBg = !!(videoId || imageUrl);
+  document.body.classList.toggle('bp-has-bg-image', hasBg);
+
   let bg = document.getElementById(BG_OVERLAY_ID);
-  if (!url) {
+  if (!hasBg) {
+    teardownBgVideo();
     bg?.remove();
     return;
   }
@@ -3129,24 +3155,272 @@ function applyBackgroundImage(custom: CustomTheme, themeId: string): void {
     document.body.appendChild(bg);
   }
   const mode = custom.backgroundMode ?? 'cover';
+  // Prefer the live preview overrides (active slider drag) over stored values
+  // so a dispatch-driven re-apply doesn't snap brightness/volume back.
+  const brightness = previewBrightness ?? clampBrightness(custom.backgroundBrightness);
+  bgVolume = previewVolume ?? clampVolume(custom.backgroundVideoVolume);
+  hookWindowAudio();
+
+  // Shared container base: fixed full-viewport, behind page content, inert.
+  // NOTE: no `overflow: hidden` and no default `filter` here — both can knock a
+  // <video> off the GPU's zero-copy hardware-overlay plane and force per-frame
+  // compositing (visible as dropped frames / low FPS, worst on non-Chromium
+  // builds like Opera). Brightness is applied via `applyOverlayBrightness`,
+  // which only reaches for a CSS filter when actually brightening (>100%).
+  bg.style.position = 'fixed';
+  bg.style.inset = '0';
+  bg.style.zIndex = '-1';
+  bg.style.pointerEvents = 'none';
+
+  if (videoId) {
+    applyBackgroundVideo(bg, videoId, imageUrl, mode);
+  } else {
+    teardownBgVideo();
+    applyBackgroundStill(bg, imageUrl as string, mode);
+  }
+  applyOverlayBrightness(bg, brightness);
+  // Covers the "same video already mounted" early-return path in
+  // applyBackgroundVideo; the fresh-mount path syncs itself once the async blob
+  // load finishes. syncVideoPlayback also pauses if the window is unfocused.
+  syncVideoPlayback();
+}
+
+function clampVolume(v: number | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(100, Math.round(v)));
+}
+
+/**
+ * Applies the desired audio state to the mounted background video. The video
+ * is muted when the user's volume is 0 OR the browser window is unfocused, so
+ * a wallpaper with sound never plays into the background while the user is in
+ * another app. Safe to call when no video is mounted (no-op).
+ */
+function applyVideoAudio(): void {
+  if (!bgVideoEl) return;
+  // Use the live focus/visibility state, not just the cached blur flag, so a
+  // stray apply while the window isn't actually focused can never unmute.
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : !bgWindowBlurred;
+  bgVideoEl.volume = Math.max(0, Math.min(1, bgVolume / 100));
+  bgVideoEl.muted = bgVolume <= 0 || bgWindowBlurred || !focused || document.hidden;
+}
+
+/**
+ * Mutes the background video whenever the browser window loses focus (and
+ * restores on focus). `visibilitychange` only fires on tab switches within the
+ * browser — switching to a *different application* leaves the tab "visible",
+ * so a window-level blur/focus hook is what catches "Opera is unfocused".
+ */
+function hookWindowAudio(): void {
+  if (bgWindowAudioHooked) return;
+  bgWindowAudioHooked = true;
+  window.addEventListener('blur', () => {
+    bgWindowBlurred = true;
+    syncVideoPlayback(); // pause + mute while the window is unfocused
+  });
+  window.addEventListener('focus', () => {
+    bgWindowBlurred = false;
+    syncVideoPlayback();
+  });
+  // Initialize from the current focus state (page may load unfocused).
+  bgWindowBlurred = typeof document.hasFocus === 'function' ? !document.hasFocus() : false;
+}
+
+/**
+ * Browsers block unmuted autoplay without a user gesture, so a saved
+ * volume > 0 can't take effect on a cold page load until the user interacts.
+ * Re-apply the audio on the first gesture so the chosen volume kicks in.
+ */
+function hookFirstGestureUnmute(): void {
+  if (bgGestureUnmuteHooked) return;
+  bgGestureUnmuteHooked = true;
+  // Only a real pointer interaction unblocks autoplay-with-sound. We must NOT
+  // unmute on keydown: keyboard app-switch shortcuts (e.g. Ctrl+Alt+Tab) fire
+  // keydown on the page *before* the window `blur` event lands, which would
+  // unmute the audio right as the user is leaving the window — the reported
+  // "sound starts when I Ctrl+Alt+Tab" bug.
+  window.addEventListener('pointerdown', () => syncVideoPlayback(), { capture: true, passive: true });
+}
+
+/**
+ * Applies background brightness without breaking the video hardware-overlay
+ * fast path:
+ *   - 100% (default) → no filter, no dim layer (fastest; video stays on the
+ *     zero-copy overlay plane).
+ *   - < 100% (dimming, the common wallpaper adjustment) → a translucent black
+ *     `.bp-bg-dim` child instead of a CSS filter, so the video keeps its plane.
+ *   - > 100% (brightening, rare) → fall back to `filter: brightness()` on the
+ *     container; can't brighten with an overlay. Accepts the perf hit.
+ */
+function applyOverlayBrightness(bg: HTMLElement, brightness: number): void {
+  let dim = bg.querySelector<HTMLElement>('.bp-bg-dim');
+  if (brightness > 100) {
+    bg.style.filter = `brightness(${brightness}%)`;
+    if (dim) dim.style.opacity = '0';
+    return;
+  }
+  bg.style.filter = '';
+  if (brightness < 100) {
+    if (!dim) {
+      dim = document.createElement('div');
+      dim.className = 'bp-bg-dim';
+      dim.style.cssText =
+        'position:absolute;inset:0;background:#000;pointer-events:none;z-index:1;';
+      bg.appendChild(dim);
+    }
+    dim.style.opacity = String((100 - brightness) / 100);
+  } else if (dim) {
+    dim.style.opacity = '0';
+  }
+}
+
+/** Paints a still image directly onto the overlay container. */
+function applyBackgroundStill(
+  bg: HTMLElement,
+  url: string,
+  mode: 'cover' | 'contain' | 'tile'
+): void {
   const repeat = mode === 'tile' ? 'repeat' : 'no-repeat';
   const size = mode === 'tile' ? 'auto' : mode;
-  const brightness = clampBrightness(custom.backgroundBrightness);
-  bg.setAttribute(
-    'style',
-    [
-      'position: fixed',
-      'inset: 0',
-      'z-index: -1',
-      'pointer-events: none',
-      `background-image: url(${JSON.stringify(url)})`,
-      `background-size: ${size}`,
-      `background-repeat: ${repeat}`,
-      'background-position: center center',
-      'background-attachment: fixed',
-      `filter: brightness(${brightness}%)`,
-    ].join(';')
-  );
+  bg.style.backgroundImage = `url(${JSON.stringify(url)})`;
+  bg.style.backgroundSize = size;
+  bg.style.backgroundRepeat = repeat;
+  bg.style.backgroundPosition = 'center center';
+}
+
+/**
+ * Loads the video blob from IndexedDB and mounts a looping `<video>` inside the
+ * overlay. The optional `posterUrl` (the theme's still `backgroundImage`) paints
+ * on the container underneath so there's no blank flash before the blob loads.
+ * Async-race-guarded by `bgVideoSeq` so rapid theme swaps never mount a stale
+ * video. `tile` mode is not meaningful for video → treated as `cover`.
+ */
+function applyBackgroundVideo(
+  bg: HTMLElement,
+  videoId: string,
+  posterUrl: string | undefined,
+  mode: 'cover' | 'contain' | 'tile'
+): void {
+  const fit = mode === 'contain' ? 'contain' : 'cover';
+  // Poster underneath the (possibly still-loading) video.
+  bg.style.backgroundImage = posterUrl ? `url(${JSON.stringify(posterUrl)})` : '';
+  bg.style.backgroundSize = fit;
+  bg.style.backgroundRepeat = 'no-repeat';
+  bg.style.backgroundPosition = 'center center';
+
+  // Same video already mounted in this container → just refresh the fit.
+  if (bgVideoId === videoId && bgVideoEl && bgVideoEl.parentElement === bg) {
+    bgVideoEl.style.objectFit = fit;
+    return;
+  }
+
+  teardownBgVideo();
+  const seq = bgVideoSeq;
+  void getVideo(videoId).then((blob) => {
+    if (seq !== bgVideoSeq) return; // superseded by a newer apply/teardown
+    if (!blob) return; // blob missing → poster (if any) stays as fallback
+    const container = document.getElementById(BG_OVERLAY_ID);
+    if (!container) return;
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement('video');
+    // The class lets teardown sweep up any stray/forgotten background video in
+    // the document — a detached or unreferenced <video> keeps playing audio
+    // until GC, so every one we create must be findable and killable.
+    v.className = 'bp-bg-video';
+    v.autoplay = true;
+    v.loop = true;
+    // Start muted so autoplay is always allowed; `applyVideoAudio` raises the
+    // volume afterward if the user set one (and a gesture has unblocked audio).
+    v.muted = true;
+    v.defaultMuted = true;
+    v.playsInline = true;
+    v.setAttribute('playsinline', '');
+    v.setAttribute('aria-hidden', 'true');
+    v.src = url;
+    v.style.cssText = `position:absolute;inset:0;width:100%;height:100%;object-fit:${fit};z-index:0;`;
+    container.appendChild(v);
+    bgVideoEl = v;
+    bgVideoUrl = url;
+    bgVideoId = videoId;
+    hookVisibilityPause();
+    hookWindowAudio();
+    hookFirstGestureUnmute();
+    syncVideoPlayback();
+  });
+}
+
+/**
+ * Fully stops and releases a video element. `pause()` + `removeAttribute('src')`
+ * alone is NOT enough on some Chromium builds (Opera especially) — the element
+ * can keep playing the already-buffered media; `load()` aborts that and frees
+ * the resource. Always run this before dropping a reference to a video we made.
+ */
+function killVideoEl(v: HTMLVideoElement): void {
+  try {
+    v.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    v.muted = true;
+  } catch {
+    /* ignore */
+  }
+  v.removeAttribute('src');
+  try {
+    v.load();
+  } catch {
+    /* ignore */
+  }
+  v.remove();
+}
+
+/**
+ * Plays or pauses the background video to match the current focus/visibility,
+ * then applies the audio (volume/mute) state. Pausing — not just muting — on
+ * blur/hidden guarantees no sound leaks into the background even if a mute race
+ * loses, and saves GPU while the window is away.
+ */
+function syncVideoPlayback(): void {
+  if (!bgVideoEl) return;
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : !bgWindowBlurred;
+  if (document.hidden || bgWindowBlurred || !focused) {
+    try {
+      bgVideoEl.pause();
+    } catch {
+      /* ignore */
+    }
+  } else {
+    void bgVideoEl.play().catch(() => {});
+  }
+  applyVideoAudio();
+}
+
+/** Removes any mounted background video and invalidates in-flight blob loads. */
+function teardownBgVideo(): void {
+  bgVideoSeq++;
+  // Kill the tracked element AND any stray `bp-bg-video` still in the document
+  // (defends against an orphan left by a race or external DOM mutation — those
+  // keep playing audibly otherwise, surviving theme switches).
+  document.querySelectorAll<HTMLVideoElement>('video.bp-bg-video').forEach((v) => {
+    if (v !== bgVideoEl) killVideoEl(v);
+  });
+  if (bgVideoEl) {
+    killVideoEl(bgVideoEl);
+    bgVideoEl = null;
+  }
+  if (bgVideoUrl) {
+    URL.revokeObjectURL(bgVideoUrl);
+    bgVideoUrl = null;
+  }
+  bgVideoId = null;
+}
+
+/** Pauses the background video on hidden tabs so it doesn't burn GPU/battery. */
+function hookVisibilityPause(): void {
+  if (bgVisibilityHooked) return;
+  bgVisibilityHooked = true;
+  document.addEventListener('visibilitychange', () => syncVideoPlayback());
 }
 
 function clampBrightness(v: number | undefined): number {
@@ -3155,14 +3429,39 @@ function clampBrightness(v: number | undefined): number {
 }
 
 /**
- * Live-update the overlay's brightness filter without writing to storage or
- * rebuilding the theme stylesheet. Used by the Themes-page slider for
- * frame-rate-friendly dragging; commit to storage on mouseup separately.
+ * Live-update the overlay brightness without writing to storage or rebuilding
+ * the theme stylesheet. Used by the Themes-page slider for frame-rate-friendly
+ * dragging; commit to storage on mouseup separately. Routes through
+ * `applyOverlayBrightness` so the video keeps its hardware-overlay fast path.
  */
 export function setBackgroundBrightnessPreview(brightness: number): void {
+  previewBrightness = clampBrightness(brightness);
   const bg = document.getElementById(BG_OVERLAY_ID);
   if (!bg) return;
-  bg.style.filter = `brightness(${clampBrightness(brightness)}%)`;
+  applyOverlayBrightness(bg, previewBrightness);
+}
+
+/**
+ * Live-update the background-video audio volume from the Themes-page slider.
+ * Because the slider drag is a user gesture, raising the volume here can
+ * unmute even on browsers that block unmuted autoplay. Commit to storage on
+ * Apply separately. No-op when no video is mounted.
+ */
+export function setBackgroundVolumePreview(volume: number): void {
+  previewVolume = clampVolume(volume);
+  bgVolume = previewVolume;
+  applyVideoAudio();
+}
+
+/**
+ * Clears the live brightness/volume preview overrides so subsequent
+ * `applyCurrent()` calls fall back to the stored theme values. The Themes page
+ * calls this when an edit ends (Apply / Discard / preset switch / overlay
+ * close) — otherwise a stale override would leak into other themes.
+ */
+export function clearBackgroundPreviewOverrides(): void {
+  previewBrightness = null;
+  previewVolume = null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3603,6 +3902,9 @@ async function applyCurrent(): Promise<void> {
  */
 export function setBackgroundImagePreview(custom: CustomTheme | null): void {
   if (!custom) {
+    // Revert to saved → drop any live slider overrides so applyCurrent uses
+    // the stored values.
+    clearBackgroundPreviewOverrides();
     void applyCurrent();
     return;
   }

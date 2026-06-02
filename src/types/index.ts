@@ -37,9 +37,22 @@ export interface CustomTheme {
   nav?: string;
   text?: string;
   accent?: string;
-  /** Data URL of an uploaded background image (capped ~16 MB). */
+  /** Data URL of an uploaded background image (capped ~16 MB). For a video
+   *  background this doubles as the poster/first-frame still shown before the
+   *  video starts playing (so there's no blank flash). */
   backgroundImage?: string;
-  /** How the bg image is laid out. */
+  /**
+   * Key into the IndexedDB video store (`videoStore.ts`) when the background
+   * is an animated video. Videos are too large to base64 into
+   * `chrome.storage`, so only this id lives in the theme payload while the
+   * blob lives in IndexedDB. When set, the video takes precedence over
+   * `backgroundImage` for the live overlay (the image becomes the poster).
+   */
+  backgroundVideoId?: string;
+  /** Background-video audio volume, 0–100. Default 0 (muted). Audio is also
+   *  force-muted whenever the browser window loses focus. */
+  backgroundVideoVolume?: number;
+  /** How the bg image/video is laid out. `tile` is image-only. */
   backgroundMode?: 'cover' | 'contain' | 'tile';
   /** 0–200; 100 = unmodified. Applied as a CSS `filter: brightness(N%)` on
    *  the background overlay only — does not affect the rest of the page. */
@@ -107,6 +120,12 @@ export interface Settings {
   showThemes: boolean;
   /** Adds the "UHBL" entry to the left nav and lets the UHBL overlay mount. */
   showUhbl: boolean;
+  /**
+   * Shared display mode for UHBL and Badger Hub panels.
+   * Transparent keeps the current glassy cards; solid uses opaque panels for
+   * readability over busy custom themes.
+   */
+  uhblOverlayBackground: 'transparent' | 'solid';
   /**
    * Adds the "Customize" entry to the header settings dropdown and lets
    * customize mode mount. Customize mode lets the user rename, hide, reorder,
@@ -197,6 +216,7 @@ export const DEFAULT_SETTINGS: Settings = {
   robuxCashRate: 'regular',
   showThemes: true,
   showUhbl: true,
+  uhblOverlayBackground: 'transparent',
   showCustomize: false,
   showProfileNotes: false,
   gameHotkeys: {},

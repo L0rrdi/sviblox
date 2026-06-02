@@ -1,9 +1,9 @@
 import { getAuthenticatedUserId } from '@/api/users';
-import { placeIdToUniverseId } from '@/api/games';
+import { getGameInfo, placeIdToUniverseId } from '@/api/games';
 import { getGameBadges, getUserBadgeAwardedDates, BadgeDetail } from '@/api/badges';
 import { getBadgeIcons } from '@/api/thumbnails';
 import { getSettings } from '@/storage/settingsStore';
-import { escapeHtml } from '@/util/html';
+import { escapeAttr, escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-badges-style';
 const SECTION_ID = 'bloxplus-badges-section';
@@ -20,11 +20,20 @@ interface RenderState {
   badges: BadgeDetail[];
   ownership: Map<number, string | null>;
   icons: Map<number, string>;
+  rarityProfile: RarityProfile;
   filter: BadgeFilter;
   sort: BadgeSort;
+  searchQuery: string;
   colorRarity: boolean;
 }
 let state: RenderState | null = null;
+
+interface RarityProfile {
+  playerBase: number | null;
+  playerBaseLabel: string;
+  rates: Map<number, number>;
+  tiers: Map<number, number>;
+}
 
 export async function run(): Promise<void> {
   const placeId = parsePlaceIdFromUrl();
@@ -111,19 +120,26 @@ export async function run(): Promise<void> {
     const userId = await getAuthenticatedUserId();
     const ids = badges.map((b) => b.id);
 
-    const [ownership, icons] = await Promise.all([
+    const [ownership, icons, gameInfo] = await Promise.all([
       userId
         ? getUserBadgeAwardedDates(userId, ids)
         : Promise.resolve(new Map<number, string | null>()),
       getBadgeIcons(ids),
+      getGameInfo([universeId]),
     ]);
 
+    const game = gameInfo.get(universeId);
     state = {
       badges,
       ownership,
       icons,
+      rarityProfile: buildRarityProfile(
+        badges,
+        resolveRarityPlayerBase(badges, game?.visits)
+      ),
       filter: state?.filter ?? 'all',
       sort: state?.sort ?? 'default',
+      searchQuery: state?.searchQuery ?? '',
       colorRarity: Boolean(settings.showBadgeRarityColors),
     };
     renderSection(section);
@@ -259,6 +275,27 @@ function ensureStyle(): void {
     .bp-badges-controls select option {
       background: #1a1d24; color: #e6e6e6;
     }
+    .bp-badge-search-label {
+      margin-left: 2px;
+    }
+    .bp-badges-controls input[type="search"] {
+      width: 180px;
+      max-width: min(42vw, 220px);
+      background: #1a1d24;
+      color: #e6e6e6;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+      outline: none;
+    }
+    .bp-badges-controls input[type="search"]:hover {
+      border-color: rgba(255,255,255,0.32);
+    }
+    .bp-badges-controls input[type="search"]:focus {
+      border-color: rgba(74,144,226,0.9);
+      box-shadow: 0 0 0 2px rgba(74,144,226,0.18);
+    }
     .bp-badges-shown {
       font-size: 11px; opacity: 0.55; margin-left: auto;
     }
@@ -329,8 +366,6 @@ function renderSection(section: HTMLElement): void {
   const ownedCount = [...state.ownership.values()].filter(Boolean).length;
   const total = state.badges.length;
 
-  const list = applyFilterSort(state);
-
   section.innerHTML = `
     <div class="bp-badges-summary">${ownedCount}/${total} badges owned</div>
     <div class="bp-badges-controls">
@@ -350,36 +385,37 @@ function renderSection(section: HTMLElement): void {
           <option value="recently-earned">Most recently earned</option>
         </select>
       </label>
-      <span class="bp-badges-shown">${list.length} shown</span>
+      <label class="bp-badge-search-label">Search
+        <input class="bp-badge-search" type="search" placeholder="Badge name"
+          value="${escapeAttr(state.searchQuery)}" autocomplete="off" spellcheck="false">
+      </label>
+      <span class="bp-badges-shown"></span>
     </div>
-    <div class="bp-badges-list">
-      ${list
-        .map((b) =>
-          renderBadge(
-            b,
-            state!.ownership.get(b.id) ?? null,
-            state!.icons.get(b.id),
-            state!.colorRarity
-          )
-        )
-        .join('')}
-    </div>
+    <div class="bp-badges-list"></div>
   `;
 
   const filterEl = section.querySelector('.bp-filter') as HTMLSelectElement;
   const sortEl = section.querySelector('.bp-sort') as HTMLSelectElement;
+  const searchEl = section.querySelector('.bp-badge-search') as HTMLInputElement;
   filterEl.value = state.filter;
   sortEl.value = state.sort;
+  searchEl.value = state.searchQuery;
+  renderBadgeResults(section);
 
   filterEl.addEventListener('change', () => {
     if (!state) return;
     state.filter = filterEl.value as BadgeFilter;
-    renderSection(section);
+    renderBadgeResults(section);
   });
   sortEl.addEventListener('change', () => {
     if (!state) return;
     state.sort = sortEl.value as BadgeSort;
-    renderSection(section);
+    renderBadgeResults(section);
+  });
+  searchEl.addEventListener('input', () => {
+    if (!state) return;
+    state.searchQuery = searchEl.value;
+    renderBadgeResults(section);
   });
 }
 
@@ -388,23 +424,34 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
   let arr = s.badges.slice();
   if (s.filter === 'owned') arr = arr.filter(isOwned);
   else if (s.filter === 'unowned') arr = arr.filter((b) => !isOwned(b));
+  const query = s.searchQuery.trim().toLocaleLowerCase();
+  if (query) {
+    arr = arr.filter((b) => (b.displayName ?? b.name).toLocaleLowerCase().includes(query));
+  }
 
   const wonEver = (b: BadgeDetail) => b.statistics?.awardedCount ?? -1;
   const wonY = (b: BadgeDetail) => b.statistics?.pastDayAwardedCount ?? -1;
-  const tier = (b: BadgeDetail) =>
-    rarityTierIndex(b.statistics?.pastDayAwardedCount, b.statistics?.awardedCount);
+  const rarityScore = (b: BadgeDetail) =>
+    s.rarityProfile.rates.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+  const rarestYesterday = (b: BadgeDetail) =>
+    typeof b.statistics?.pastDayAwardedCount === 'number'
+      ? b.statistics.pastDayAwardedCount
+      : Number.MAX_SAFE_INTEGER;
+  const rarestEver = (b: BadgeDetail) =>
+    typeof b.statistics?.awardedCount === 'number'
+      ? b.statistics.awardedCount
+      : Number.MAX_SAFE_INTEGER;
 
   switch (s.sort) {
     case 'rarest':
-      // Sort by rarity tier descending (Impossible → Easy), same formula as
-      // the Rarity column so the order matches what the user sees. Within
-      // a tier, ascending yesterday count puts the rarer-within-tier badges
-      // first; lifetime count is the final tiebreaker.
+      // Sort by the same primary signal as the Rarity column: lowest
+      // badge-wins-per-game-player rate first. Yesterday's wins only breaks
+      // ties when two badges have the same rate.
       arr.sort(
         (a, b) =>
-          tier(b) - tier(a) ||
-          wonY(a) - wonY(b) ||
-          wonEver(a) - wonEver(b)
+          rarityScore(a) - rarityScore(b) ||
+          rarestYesterday(a) - rarestYesterday(b) ||
+          rarestEver(a) - rarestEver(b)
       );
       break;
     case 'most-won':
@@ -440,10 +487,33 @@ function applyFilterSort(s: RenderState): BadgeDetail[] {
   return arr;
 }
 
+function renderBadgeResults(section: HTMLElement): void {
+  if (!state) return;
+  const list = applyFilterSort(state);
+  const shown = section.querySelector<HTMLElement>('.bp-badges-shown');
+  if (shown) shown.textContent = `${list.length} shown`;
+  const host = section.querySelector<HTMLElement>('.bp-badges-list');
+  if (!host) return;
+  host.innerHTML = list.length
+    ? list
+        .map((b) =>
+          renderBadge(
+            b,
+            state!.ownership.get(b.id) ?? null,
+            state!.icons.get(b.id),
+            state!.rarityProfile,
+            state!.colorRarity
+          )
+        )
+        .join('')
+    : `<div class="bp-badges-empty">No badges match your search.</div>`;
+}
+
 function renderBadge(
   b: BadgeDetail,
   awardedDate: string | null,
   icon: string | undefined,
+  rarityProfile: RarityProfile,
   colorRarity: boolean
 ): string {
   const owned = !!awardedDate;
@@ -451,14 +521,21 @@ function renderBadge(
   const yesterday = b.statistics?.pastDayAwardedCount;
   const ever = b.statistics?.awardedCount;
   const winRate = b.statistics?.winRatePercentage;
-  // Rarity tier is yesterday-based; lifetime ever is used as a floor so
-  // a badge with 0 yesterday but high lifetime count doesn't drop to
-  // "Impossible". Lifetime % is kept only as tooltip context.
-  const rarityClass = colorRarity ? rarityBucket(yesterday, ever) : '';
-  const rarityLabel = rarityName(yesterday, ever);
+  // Rarity is dynamic per game: badge win rate is compared against every
+  // other badge in this game, using the game's player/visit base as context.
+  const rarityClass = colorRarity ? rarityBucket(b.id, rarityProfile) : '';
+  const rarityLabel = rarityName(b.id, rarityProfile);
   const lifetimePctStr =
     typeof winRate === 'number' ? `${(winRate * 100).toFixed(2)}% lifetime` : '';
-  const rarityTooltip = [rarityLabel, lifetimePctStr].filter(Boolean).join(' · ');
+  const lifetimeWinsStr = typeof ever === 'number' ? `${ever.toLocaleString()} lifetime wins` : '';
+  const rate = rarityProfile.rates.get(b.id);
+  const gameRateStr =
+    typeof rate === 'number'
+      ? `${(rate * 100).toFixed(rate < 0.001 ? 4 : 2)}% of ${rarityProfile.playerBaseLabel}`
+      : '';
+  const rarityTooltip = [rarityLabel, lifetimeWinsStr, gameRateStr, lifetimePctStr]
+    .filter(Boolean)
+    .join(' - ');
 
   return `
     <div class="bp-badge-row ${owned ? 'bp-owned' : 'bp-locked'}">
@@ -490,31 +567,75 @@ function renderBadge(
   `;
 }
 
-// Rarity is computed from `pastDayAwardedCount` (badges won yesterday)
-// rather than the lifetime `winRatePercentage`. Lifetime % mostly
-// measures how long the game has been popular — a years-old game with
-// millions of casual players inflates the denominator and makes every
-// badge look "impossible" regardless of how hard it actually is right
-// now. Yesterday's count tracks current active-player effort, which is
-// the more honest signal.
-//
-// The 0-yesterday case is special: a badge that's been earned tens of
-// thousands of times lifetime but happens to have 0 yesterday is not
-// "Impossible" — it's just not active today (could be a snapshot blip,
-// or the game's playerbase is small but consistent). So we use lifetime
-// `awardedCount` as a sanity floor for the bottom bucket.
-//
-// rarityTierIndex returns a numeric tier (0=Easy → 4=Impossible) so the
-// "Rarest first" sort can use the same formula as the Rarity column.
-// Without this, the sort drifted off lifetime `awardedCount` while the
-// column used yesterday — making the sorted list look scrambled.
-function rarityTierIndex(yesterday: number | undefined, ever: number | undefined): number {
-  if (typeof yesterday !== 'number') return -1;
-  if (yesterday >= 1000) return 0; // Easy
-  if (yesterday >= 100) return 1; // Medium
-  if (yesterday >= 10) return 2; // Hard
-  if (yesterday >= 1) return 3; // Insane
-  if (typeof ever === 'number' && ever >= 10000) return 3; // Insane (historical)
+function resolveRarityPlayerBase(
+  badges: BadgeDetail[],
+  visits: number | undefined
+): { count: number | null; label: string } {
+  if (typeof visits === 'number' && visits > 0) {
+    return { count: visits, label: `${visits.toLocaleString()} visits` };
+  }
+  const maxAwarded = Math.max(
+    0,
+    ...badges.map((b) =>
+      typeof b.statistics?.awardedCount === 'number' ? b.statistics.awardedCount : 0
+    )
+  );
+  return maxAwarded > 0
+    ? { count: maxAwarded, label: `${maxAwarded.toLocaleString()} top badge wins` }
+    : { count: null, label: 'game players' };
+}
+
+// Rarity is per-game, not fixed-cap. We compare each badge's lifetime wins
+// divided by the game's player/visit base, then bucket by that badge's
+// percentile among all badges in the same game.
+function buildRarityProfile(
+  badges: BadgeDetail[],
+  playerBase: { count: number | null; label: string }
+): RarityProfile {
+  const rates = new Map<number, number>();
+  const tierInputs: Array<{ id: number; rate: number }> = [];
+  const denominator = playerBase.count;
+  if (denominator && denominator > 0) {
+    for (const badge of badges) {
+      const awarded = badge.statistics?.awardedCount;
+      if (typeof awarded !== 'number') continue;
+      const rate = awarded / denominator;
+      rates.set(badge.id, rate);
+      tierInputs.push({ id: badge.id, rate });
+    }
+  }
+
+  const tiers = new Map<number, number>();
+  tierInputs.sort((a, b) => a.rate - b.rate || a.id - b.id);
+  const min = tierInputs[0]?.rate;
+  const max = tierInputs[tierInputs.length - 1]?.rate;
+  for (const row of tierInputs) {
+    tiers.set(row.id, dynamicRarityTier(row.rate, tierInputs, min, max));
+  }
+
+  return {
+    playerBase: denominator,
+    playerBaseLabel: playerBase.label,
+    rates,
+    tiers,
+  };
+}
+
+function dynamicRarityTier(
+  rate: number,
+  sortedRates: Array<{ rate: number }>,
+  min: number | undefined,
+  max: number | undefined
+): number {
+  if (!sortedRates.length || typeof min !== 'number' || typeof max !== 'number') return -1;
+  if (min === max) return 2; // everything is equally common for this game
+  const lessCount = sortedRates.findIndex((row) => row.rate >= rate);
+  const rank = lessCount < 0 ? sortedRates.length - 1 : lessCount;
+  const percentile = rank / Math.max(1, sortedRates.length - 1);
+  if (percentile >= 0.8) return 0; // Easy
+  if (percentile >= 0.6) return 1; // Medium
+  if (percentile >= 0.4) return 2; // Hard
+  if (percentile >= 0.2) return 3; // Insane
   return 4; // Impossible
 }
 
@@ -527,13 +648,13 @@ const TIER_CLASSES = [
 ];
 const TIER_NAMES = ['Easy', 'Medium', 'Hard', 'Insane', 'Impossible'];
 
-function rarityBucket(yesterday: number | undefined, ever: number | undefined): string {
-  const idx = rarityTierIndex(yesterday, ever);
+function rarityBucket(badgeId: number, profile: RarityProfile): string {
+  const idx = profile.tiers.get(badgeId) ?? -1;
   return idx < 0 ? '' : TIER_CLASSES[idx];
 }
 
-function rarityName(yesterday: number | undefined, ever: number | undefined): string {
-  const idx = rarityTierIndex(yesterday, ever);
+function rarityName(badgeId: number, profile: RarityProfile): string {
+  const idx = profile.tiers.get(badgeId) ?? -1;
   return idx < 0 ? 'Unknown' : TIER_NAMES[idx];
 }
 

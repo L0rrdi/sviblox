@@ -11,6 +11,7 @@ playwright-report/
 
 # Build artifacts — regenerable, not source.
 sviblox-beta-*-chrome-web-store.zip
+sviblox-*.zip
 _zip_audit/
 
 # Test screenshots and other ad-hoc PNGs at repo root. The four icons

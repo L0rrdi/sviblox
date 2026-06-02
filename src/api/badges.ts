@@ -97,6 +97,11 @@ export interface UserBadgesPageResult {
   nextPageCursor: string | null;
 }
 
+interface UserBadgesOptions {
+  forceRefresh?: boolean;
+  onPage?: (page: number, totalLoaded: number) => void;
+}
+
 /**
  * Single page of `/v1/users/{id}/badges`. Returns the cursor so the caller
  * can decide whether to walk further (lazy "Show all" expansion in the
@@ -105,7 +110,8 @@ export interface UserBadgesPageResult {
 export async function getUserBadgesPage(
   userId: number,
   cursor = '',
-  limit = 100
+  limit = 100,
+  opts: { forceRefresh?: boolean } = {}
 ): Promise<UserBadgesPageResult> {
   const data = await robloxFetch<UserBadgesPage>(
     `https://badges.roblox.com/v1/users/${userId}/badges` +
@@ -115,6 +121,7 @@ export async function getUserBadgesPage(
       cacheKey: `userBadges:${userId}:${cursor || 'first'}:${limit}`,
       cacheTtlMs: 5 * 60_000,
       retries: 1,
+      forceRefresh: opts.forceRefresh,
     }
   );
   return { badges: data.data ?? [], nextPageCursor: data.nextPageCursor };
@@ -126,13 +133,17 @@ export async function getUserBadgesPage(
  */
 export async function getAllUserBadges(
   userId: number,
-  maxPages = 20
+  maxPages = 20,
+  opts: UserBadgesOptions = {}
 ): Promise<BadgeDetail[]> {
   const out: BadgeDetail[] = [];
   let cursor = '';
   for (let page = 0; page < maxPages; page += 1) {
-    const { badges, nextPageCursor } = await getUserBadgesPage(userId, cursor);
+    const { badges, nextPageCursor } = await getUserBadgesPage(userId, cursor, 100, {
+      forceRefresh: opts.forceRefresh,
+    });
     out.push(...badges);
+    opts.onPage?.(page + 1, out.length);
     if (!nextPageCursor) break;
     cursor = nextPageCursor;
   }
