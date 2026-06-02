@@ -121,8 +121,12 @@ export async function run(): Promise<void> {
     const ids = badges.map((b) => b.id);
 
     const [ownership, icons, gameInfo] = await Promise.all([
+      // Always re-check ownership on a fresh game-page render so a just-earned
+      // badge shows as owned immediately, instead of waiting out the 5-minute
+      // awarded-dates cache. This render path is guarded by `renderedFor`, so it
+      // runs once per page entry/reload — not on every mutation tick.
       userId
-        ? getUserBadgeAwardedDates(userId, ids)
+        ? getUserBadgeAwardedDates(userId, ids, { forceRefresh: true })
         : Promise.resolve(new Map<number, string | null>()),
       getBadgeIcons(ids),
       getGameInfo([universeId]),

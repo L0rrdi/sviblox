@@ -152,7 +152,8 @@ export async function getAllUserBadges(
 
 export async function getUserBadgeAwardedDates(
   userId: number,
-  badgeIds: number[]
+  badgeIds: number[],
+  opts: { forceRefresh?: boolean } = {}
 ): Promise<Map<number, string | null>> {
   const out = new Map<number, string | null>();
   if (!badgeIds.length) return out;
@@ -166,6 +167,7 @@ export async function getUserBadgeAwardedDates(
     }>(url, {
       cacheKey: `badgeOwn:${userId}:${batch.join(',')}`,
       cacheTtlMs: 5 * 60_000,
+      forceRefresh: opts.forceRefresh,
     });
     for (const row of data.data ?? []) out.set(row.badgeId, row.awardedDate);
   }
