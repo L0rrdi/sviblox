@@ -27,23 +27,30 @@ import * as accountAgeEnhancer from './accountAgeEnhancer';
 import * as mutualsEnhancer from './mutualsEnhancer';
 import * as profileNotesEnhancer from './profileNotesEnhancer';
 import * as friendNicknameDecorator from './friendNicknameDecorator';
+import * as friendCategoriesPage from './friendCategoriesPage';
+import * as friendCategoryDecorator from './friendCategoryDecorator';
 import * as hotkeysEnhancer from './hotkeysEnhancer';
 import * as favoritesPageEnhancer from './favoritesPageEnhancer';
 import * as customizeApplier from './customizeApplier';
 import * as customizeMode from './customizeMode';
 import * as customizeMenuEntry from './customizeMenuEntry';
 import { install as installBannedProfileTrap } from './bannedProfileTrap';
+import { install as installCarouselWheelScroll } from './carouselWheelScroll';
 
 themesPage.install();
 uhblPage.install();
 badgerHubPage.install();
 customizeMode.install();
 customizeMenuEntry.install();
+friendCategoriesPage.install();
 // Always-on click listener that stashes any clicked /users/{id}/profile
 // userId so terminatedProfileEnhancer can recover it after Roblox redirects
 // a banned profile to /request-error. Idempotent.
 installBannedProfileTrap();
 installRoProStorageReader();
+// Single always-on wheel listener: rolling the wheel over a horizontal
+// carousel scrolls it (up = right arrow, down = left arrow).
+installCarouselWheelScroll();
 
 function dispatch(): void {
   void homeEnhancer.run();
@@ -63,6 +70,8 @@ function dispatch(): void {
   void accountAgeEnhancer.run();
   void profileNotesEnhancer.run();
   void friendNicknameDecorator.run();
+  void friendCategoryDecorator.run();
+  friendCategoriesPage.run();
   void hotkeysEnhancer.run();
   void favoritesPageEnhancer.run();
   mutualsEnhancer.run();

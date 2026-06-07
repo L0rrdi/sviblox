@@ -3243,35 +3243,33 @@ function hookFirstGestureUnmute(): void {
 }
 
 /**
- * Applies background brightness without breaking the video hardware-overlay
- * fast path:
- *   - 100% (default) → no filter, no dim layer (fastest; video stays on the
- *     zero-copy overlay plane).
- *   - < 100% (dimming, the common wallpaper adjustment) → a translucent black
- *     `.bp-bg-dim` child instead of a CSS filter, so the video keeps its plane.
- *   - > 100% (brightening, rare) → fall back to `filter: brightness()` on the
- *     container; can't brighten with an overlay. Accepts the perf hit.
+ * Applies background brightness WITHOUT ever setting a CSS `filter` on the
+ * overlay. A filter forces the `<video>` off the GPU's zero-copy hardware-overlay
+ * plane into per-frame compositing — a large FPS hit (worst on Opera) — and it's
+ * binary, so even 101% pays the full cost. Brightness is approximated with a
+ * translucent child that preserves the plane:
+ *   - 100% (default) → child hidden (fastest; video stays on the overlay plane).
+ *   - < 100% (darken) → translucent **black** `.bp-bg-dim` child.
+ *   - > 100% (lighten) → translucent **white** `.bp-bg-dim` child (a wash rather
+ *     than a true luminance boost, but it keeps the plane; brightening a
+ *     wallpaper is rare and small).
  */
 function applyOverlayBrightness(bg: HTMLElement, brightness: number): void {
+  bg.style.filter = '';
   let dim = bg.querySelector<HTMLElement>('.bp-bg-dim');
-  if (brightness > 100) {
-    bg.style.filter = `brightness(${brightness}%)`;
+  const delta = brightness - 100;
+  if (!delta) {
     if (dim) dim.style.opacity = '0';
     return;
   }
-  bg.style.filter = '';
-  if (brightness < 100) {
-    if (!dim) {
-      dim = document.createElement('div');
-      dim.className = 'bp-bg-dim';
-      dim.style.cssText =
-        'position:absolute;inset:0;background:#000;pointer-events:none;z-index:1;';
-      bg.appendChild(dim);
-    }
-    dim.style.opacity = String((100 - brightness) / 100);
-  } else if (dim) {
-    dim.style.opacity = '0';
+  if (!dim) {
+    dim = document.createElement('div');
+    dim.className = 'bp-bg-dim';
+    dim.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:1;';
+    bg.appendChild(dim);
   }
+  dim.style.background = delta < 0 ? '#000' : '#fff';
+  dim.style.opacity = String(Math.min(1, Math.abs(delta) / 100));
 }
 
 /** Paints a still image directly onto the overlay container. */

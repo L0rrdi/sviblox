@@ -29,72 +29,92 @@ export interface OpenMenuOpts {
 
 let outsideHandlerAttached = false;
 let escapeHandlerAttached = false;
+let repositionHandlerAttached = false;
 let openSeq = 0;
+// The anchor the open menu is glued to, so scroll/resize can keep it in place.
+let currentAnchor: HTMLElement | null = null;
+let repositionRaf = 0;
 
 export async function openFolderMenu(opts: OpenMenuOpts): Promise<void> {
   closeMenu();
   const seq = ++openSeq;
-  const state = await getFolders();
+  let state = await getFolders();
   if (seq !== openSeq) return;
   const menu = document.createElement('div');
   menu.id = MENU_ID;
   menu.className = 'bp-folder-menu';
   menu.setAttribute('role', 'menu');
-
-  const lines: string[] = [];
-  if (!state.folders.length) {
-    lines.push(`<div class="bp-folder-menu-empty">No folders yet</div>`);
-  } else {
-    for (const f of state.folders) {
-      const has = f.games.some((g) => g.universeId === opts.game.universeId);
-      lines.push(
-        `<button type="button" class="bp-folder-menu-item${has ? ' bp-folder-menu-item-has' : ''}"
-                 data-folder-id="${f.id}" data-folder-has="${has ? '1' : '0'}"
-                 aria-label="${has ? 'Remove from' : 'Add to'} ${escapeHtml(f.name)}">
-           <span class="bp-folder-menu-icon">${has ? '✓' : '+'}</span>
-           <span class="bp-folder-menu-name">${escapeHtml(f.name)}</span>
-           <span class="bp-folder-menu-count">${f.games.length}</span>
-         </button>`
-      );
-    }
-  }
-  lines.push(`<div class="bp-folder-menu-sep"></div>`);
-  lines.push(
-    `<button type="button" class="bp-folder-menu-item bp-folder-menu-new" data-folder-new>
-       <span class="bp-folder-menu-icon">＋</span>
-       <span class="bp-folder-menu-name">New folder…</span>
-     </button>`
-  );
-  menu.innerHTML = lines.join('');
   document.body.appendChild(menu);
-  positionMenu(menu, opts.anchor);
+  currentAnchor = opts.anchor;
 
-  for (const el of menu.querySelectorAll<HTMLButtonElement>('[data-folder-id]')) {
-    el.addEventListener('click', async () => {
-      const id = el.dataset.folderId!;
-      const folderName =
-        state.folders.find((f) => f.id === id)?.name ?? 'folder';
-      if (el.dataset.folderHas === '1') {
-        await removeGameFromFolder(id, opts.game.universeId);
-        opts.onRemoved?.(folderName);
-      } else {
-        await addGameToFolder(id, opts.game);
-        opts.onAdded?.(folderName);
+  // Re-render the menu contents in place. Toggling membership or creating a
+  // folder calls this rather than closing — the menu stays open so the user can
+  // file a game into several folders in one go. It only closes on an outside
+  // click or Escape (handlers below).
+  const render = (): void => {
+    const lines: string[] = [];
+    if (!state.folders.length) {
+      lines.push(`<div class="bp-folder-menu-empty">No folders yet</div>`);
+    } else {
+      for (const f of state.folders) {
+        const has = f.games.some((g) => g.universeId === opts.game.universeId);
+        lines.push(
+          `<button type="button" class="bp-folder-menu-item${has ? ' bp-folder-menu-item-has' : ''}"
+                   data-folder-id="${f.id}" data-folder-has="${has ? '1' : '0'}"
+                   aria-label="${has ? 'Remove from' : 'Add to'} ${escapeHtml(f.name)}">
+             <span class="bp-folder-menu-icon">${has ? '✓' : '+'}</span>
+             <span class="bp-folder-menu-name">${escapeHtml(f.name)}</span>
+             <span class="bp-folder-menu-count">${f.games.length}</span>
+           </button>`
+        );
       }
-      closeMenu();
-    });
-  }
-  menu.querySelector('[data-folder-new]')?.addEventListener('click', async () => {
-    const name = window.prompt('Folder name')?.trim();
-    if (!name) {
-      closeMenu();
-      return;
     }
-    const folder = await createFolder(name);
-    await addGameToFolder(folder.id, opts.game);
-    opts.onAdded?.(folder.name);
-    closeMenu();
-  });
+    lines.push(`<div class="bp-folder-menu-sep"></div>`);
+    lines.push(
+      `<button type="button" class="bp-folder-menu-item bp-folder-menu-new" data-folder-new>
+         <span class="bp-folder-menu-icon">＋</span>
+         <span class="bp-folder-menu-name">New folder…</span>
+       </button>`
+    );
+    menu.innerHTML = lines.join('');
+    positionMenu(menu, opts.anchor);
+    wire();
+  };
+
+  // Pull fresh folder state and re-render, unless this menu has been superseded.
+  const refresh = async (): Promise<void> => {
+    const next = await getFolders();
+    if (seq !== openSeq || !menu.isConnected) return;
+    state = next;
+    render();
+  };
+
+  const wire = (): void => {
+    for (const el of menu.querySelectorAll<HTMLButtonElement>('[data-folder-id]')) {
+      el.addEventListener('click', async () => {
+        const id = el.dataset.folderId!;
+        const folderName = state.folders.find((f) => f.id === id)?.name ?? 'folder';
+        if (el.dataset.folderHas === '1') {
+          await removeGameFromFolder(id, opts.game.universeId);
+          opts.onRemoved?.(folderName);
+        } else {
+          await addGameToFolder(id, opts.game);
+          opts.onAdded?.(folderName);
+        }
+        await refresh();
+      });
+    }
+    menu.querySelector('[data-folder-new]')?.addEventListener('click', async () => {
+      const name = window.prompt('Folder name')?.trim();
+      if (!name) return; // keep the menu open
+      const folder = await createFolder(name);
+      await addGameToFolder(folder.id, opts.game);
+      opts.onAdded?.(folder.name);
+      await refresh();
+    });
+  };
+
+  render();
 
   if (!outsideHandlerAttached) {
     document.addEventListener('mousedown', onOutsideMouseDown, true);
@@ -104,10 +124,37 @@ export async function openFolderMenu(opts: OpenMenuOpts): Promise<void> {
     document.addEventListener('keydown', onEscape, true);
     escapeHandlerAttached = true;
   }
+  if (!repositionHandlerAttached) {
+    // Capture phase so a scroll on any ancestor scroll container (not just the
+    // window) keeps the menu glued to its anchor instead of detaching as the
+    // page scrolls under a `position: fixed` popover.
+    window.addEventListener('scroll', onReposition, true);
+    window.addEventListener('resize', onReposition);
+    repositionHandlerAttached = true;
+  }
 }
 
 export function closeMenu(): void {
   document.getElementById(MENU_ID)?.remove();
+  currentAnchor = null;
+  if (repositionRaf) {
+    cancelAnimationFrame(repositionRaf);
+    repositionRaf = 0;
+  }
+}
+
+function onReposition(): void {
+  if (repositionRaf) return;
+  repositionRaf = requestAnimationFrame(() => {
+    repositionRaf = 0;
+    const menu = document.getElementById(MENU_ID);
+    if (!menu || !currentAnchor) return;
+    if (!currentAnchor.isConnected) {
+      closeMenu();
+      return;
+    }
+    positionMenu(menu, currentAnchor);
+  });
 }
 
 function onOutsideMouseDown(e: MouseEvent): void {

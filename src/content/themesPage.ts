@@ -245,8 +245,19 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-brightness-label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
     #${PAGE_ID} .bp-brightness-label input[type="range"] { flex: 1; max-width: 320px; accent-color: #4a90e2; }
-    #${PAGE_ID} [data-bg-brightness-readout] {
-      font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; opacity: 0.8;
+    #${PAGE_ID} .bp-num-input {
+      display: inline-flex; align-items: center; gap: 2px;
+      font-size: 12px; opacity: 0.8; flex: 0 0 auto;
+    }
+    #${PAGE_ID} .bp-num-input input[type="number"] {
+      width: 50px; text-align: right; font-variant-numeric: tabular-nums;
+      background: #1a1d24; color: #e6e6e6;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      padding: 3px 6px; font-size: 12px; outline: none;
+    }
+    #${PAGE_ID} .bp-num-input input[type="number"]:hover { border-color: rgba(255,255,255,0.32); }
+    #${PAGE_ID} .bp-num-input input[type="number"]:focus {
+      border-color: rgba(74,144,226,0.9); box-shadow: 0 0 0 2px rgba(74,144,226,0.18);
     }
     #${PAGE_ID} .bp-status { font-size: 12px; opacity: 0.7; margin-top: 8px; min-height: 14px; }
 
@@ -601,7 +612,11 @@ async function render(page: HTMLElement): Promise<void> {
             <input type="range" min="0" max="200" step="1"
                    value="${clampBrightnessForUI(custom.backgroundBrightness)}"
                    data-bg-brightness />
-            <span data-bg-brightness-readout>${clampBrightnessForUI(custom.backgroundBrightness)}%</span>
+            <span class="bp-num-input">
+              <input type="number" min="0" max="200" step="1" inputmode="numeric"
+                     value="${clampBrightnessForUI(custom.backgroundBrightness)}"
+                     data-bg-brightness-num aria-label="Brightness percent" />%
+            </span>
           </label>
         </div>
         ${custom.backgroundVideoId ? `
@@ -610,7 +625,11 @@ async function render(page: HTMLElement): Promise<void> {
             <input type="range" min="0" max="100" step="1"
                    value="${clampVolumeForUI(custom.backgroundVideoVolume)}"
                    data-bg-volume />
-            <span data-bg-volume-readout>${clampVolumeForUI(custom.backgroundVideoVolume)}%</span>
+            <span class="bp-num-input">
+              <input type="number" min="0" max="100" step="1" inputmode="numeric"
+                     value="${clampVolumeForUI(custom.backgroundVideoVolume)}"
+                     data-bg-volume-num aria-label="Video volume percent" />%
+            </span>
           </label>
         </div>
         <p class="bp-tp-sub" style="margin: 2px 0 0 0;">Muted by default. Audio is silenced automatically while the browser window is in the background.</p>` : ''}
@@ -973,28 +992,31 @@ async function render(page: HTMLElement): Promise<void> {
     setStatus(`Background removed from "${activeEntry.name}".`);
   });
 
-  // Brightness — preview live while dragging, commit on Apply.
-  const brightnessEl = page.querySelector<HTMLInputElement>('[data-bg-brightness]');
-  const brightnessReadout = page.querySelector<HTMLElement>('[data-bg-brightness-readout]');
-  brightnessEl?.addEventListener('input', () => {
-    const v = clampBrightnessForUI(Number(brightnessEl.value));
-    if (brightnessReadout) brightnessReadout.textContent = `${v}%`;
-    setBackgroundBrightnessPreview(v);
-    draft.backgroundBrightness = v;
-    updateDirtyBar();
-  });
+  // Brightness — slider + exact-% number input, two-way synced. Preview live
+  // while dragging/typing, commit on Apply.
+  wireSliderNumber(
+    page.querySelector<HTMLInputElement>('[data-bg-brightness]'),
+    page.querySelector<HTMLInputElement>('[data-bg-brightness-num]'),
+    clampBrightnessForUI,
+    (v) => {
+      setBackgroundBrightnessPreview(v);
+      draft.backgroundBrightness = v;
+      updateDirtyBar();
+    }
+  );
 
-  // Video volume — preview live while dragging, commit on Apply (shown only
-  // for video backgrounds). Default 0 (muted); auto-muted on window blur.
-  const volumeEl = page.querySelector<HTMLInputElement>('[data-bg-volume]');
-  const volumeReadout = page.querySelector<HTMLElement>('[data-bg-volume-readout]');
-  volumeEl?.addEventListener('input', () => {
-    const v = clampVolumeForUI(Number(volumeEl.value));
-    if (volumeReadout) volumeReadout.textContent = `${v}%`;
-    setBackgroundVolumePreview(v);
-    draft.backgroundVideoVolume = v;
-    updateDirtyBar();
-  });
+  // Video volume — same slider + number pairing (shown only for video
+  // backgrounds). Default 0 (muted); auto-muted on window blur.
+  wireSliderNumber(
+    page.querySelector<HTMLInputElement>('[data-bg-volume]'),
+    page.querySelector<HTMLInputElement>('[data-bg-volume-num]'),
+    clampVolumeForUI,
+    (v) => {
+      setBackgroundVolumePreview(v);
+      draft.backgroundVideoVolume = v;
+      updateDirtyBar();
+    }
+  );
 
   // Layout mode.
   page.querySelector<HTMLSelectElement>('[data-bg-mode]')?.addEventListener('change', (e) => {
@@ -1240,6 +1262,36 @@ function captureVideoPoster(file: File): Promise<string | undefined> {
     v.onerror = () => finish(undefined);
     // Safety timeout so a stuck decode never hangs the upload flow.
     setTimeout(() => finish(undefined), 4000);
+  });
+}
+
+/**
+ * Two-way binds a range slider to an exact-% number input. Dragging the slider
+ * previews live (and fills the number); typing a number does NOT preview per
+ * keystroke — it only applies on `change` (blur / Enter), so the page isn't
+ * updated mid-type. Both clamp through `clamp` and run `apply` (preview + draft
+ * + dirty bar).
+ */
+function wireSliderNumber(
+  slider: HTMLInputElement | null,
+  num: HTMLInputElement | null,
+  clamp: (v: number | undefined) => number,
+  apply: (v: number) => void
+): void {
+  if (!slider) return;
+  slider.addEventListener('input', () => {
+    const v = clamp(Number(slider.value));
+    if (num) num.value = String(v);
+    apply(v);
+  });
+  if (!num) return;
+  // Commit-only: wait until the user finishes typing (blur / Enter) before
+  // applying, instead of previewing on every keystroke.
+  num.addEventListener('change', () => {
+    const v = clamp(Number(num.value));
+    num.value = String(v); // normalize on commit (clamps / fills blanks)
+    slider.value = String(v);
+    apply(v);
   });
 }
 

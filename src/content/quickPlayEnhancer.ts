@@ -76,9 +76,23 @@ function decorateNativeTiles(): void {
       continue;
     }
 
+    // Already decorated with this place → do nothing. Critical: re-writing the
+    // dataset/attribute on every pass produced tens of thousands of needless DOM
+    // mutations as Roblox churned its tiles, jamming the main thread (and
+    // janking video backgrounds). Only touch the DOM when something changed.
+    const existing = anchor.querySelector<HTMLButtonElement>('.bp-quickplay-tile');
+    if (
+      existing &&
+      existing.parentElement === anchor &&
+      existing.dataset.bpPlaceId === String(placeId) &&
+      anchor.getAttribute(DECORATED_ATTR) === String(placeId)
+    ) {
+      continue;
+    }
+
     if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
 
-    let btn = anchor.querySelector<HTMLButtonElement>('.bp-quickplay-tile');
+    let btn = existing;
     if (!btn) {
       btn = document.createElement('button');
       btn.type = 'button';
@@ -87,9 +101,11 @@ function decorateNativeTiles(): void {
       btn.title = 'Quick play';
       btn.innerHTML = ICON_HTML;
     }
-    btn.dataset.bpPlaceId = String(placeId);
+    if (btn.dataset.bpPlaceId !== String(placeId)) btn.dataset.bpPlaceId = String(placeId);
     if (btn.parentElement !== anchor) anchor.appendChild(btn);
-    anchor.setAttribute(DECORATED_ATTR, String(placeId));
+    if (anchor.getAttribute(DECORATED_ATTR) !== String(placeId)) {
+      anchor.setAttribute(DECORATED_ATTR, String(placeId));
+    }
   }
 }
 
@@ -126,7 +142,17 @@ const ICON_HTML = `
 function installObserverOnce(): void {
   if (observerInstalled) return;
   observerInstalled = true;
-  const obs = new MutationObserver(() => decorateNativeTiles());
+  // Coalesce a burst of Roblox mutations into a single decoration pass per
+  // frame instead of running the full tile scan on every mutation.
+  let scheduled = false;
+  const obs = new MutationObserver(() => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      decorateNativeTiles();
+    });
+  });
   obs.observe(document.body, { childList: true, subtree: true });
 }
 

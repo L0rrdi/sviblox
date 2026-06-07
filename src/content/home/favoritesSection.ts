@@ -4,6 +4,15 @@ import { getGameIcons } from '@/api/thumbnails';
 import { getAuthenticatedUserIdFresh } from '@/api/users';
 import { inAnyFolder } from '../folderTileDecorator';
 import { escapeHtml } from '@/util/html';
+import {
+  primeHomeSnapshots,
+  getPersistedSnapshot,
+  persistSnapshot,
+} from './homeSnapshotStore';
+
+// Warm the persisted-snapshot cache at module load so the first home paint on
+// a hard refresh can show real tiles instead of "Loading…".
+primeHomeSnapshots();
 
 export function getSectionTitle(section: HTMLElement): string {
   for (const sel of ['h1', 'h2', 'h3', 'h4']) {
@@ -404,9 +413,20 @@ export function ensureFavoritesSection(): HTMLElement {
 
   ensureHomeListScroller(section);
 
+  let painted = false;
   if (favoritesUserKey) {
     const snapshot = favoritesSnapshots.get(favoritesUserKey);
-    if (snapshot) applyHomeListSnapshot(section, snapshot);
+    if (snapshot) {
+      applyHomeListSnapshot(section, snapshot);
+      painted = true;
+    }
+  }
+  // Cold load (hard refresh): paint the last persisted favorites row instantly
+  // while the async user-check + fetch reconcile. Optimistic — corrected within
+  // a tick if it's stale or for a different account.
+  if (!painted) {
+    const persisted = getPersistedSnapshot('favorites');
+    if (persisted) applyHomeListSnapshot(section, persisted);
   }
 
   void ensureFavoritesForCurrentUser(section);
@@ -516,6 +536,8 @@ async function loadFavoritesForUser(
       .join(''),
   };
   favoritesSnapshots.set(userKey, snapshot);
+  // Persist the last successful render for instant paint on the next hard load.
+  persistSnapshot('favorites', snapshot);
   updateCurrentFavoritesSection(userKey, snapshot, section);
 }
 

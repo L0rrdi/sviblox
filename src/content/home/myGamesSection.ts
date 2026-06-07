@@ -14,6 +14,7 @@ import {
   ensureHomeListScroller,
   updateCurrentHomeListSection,
 } from './favoritesSection';
+import { getPersistedSnapshot, persistSnapshot } from './homeSnapshotStore';
 
 // One-shot per signed-in Roblox user. Mirrors favoritesSection so switching
 // accounts does not keep showing the previous user's creations row.
@@ -43,9 +44,19 @@ export function ensureMyGamesSection(): HTMLElement {
     `;
   }
   ensureHomeListScroller(section);
+  let painted = false;
   if (myGamesUserKey) {
     const snapshot = myGamesSnapshots.get(myGamesUserKey);
-    if (snapshot) applyHomeListSnapshot(section, snapshot);
+    if (snapshot) {
+      applyHomeListSnapshot(section, snapshot);
+      painted = true;
+    }
+  }
+  // Cold load: paint the last persisted creations row instantly; reconciled by
+  // the async user-check + fetch below.
+  if (!painted) {
+    const persisted = getPersistedSnapshot('mygames');
+    if (persisted) applyHomeListSnapshot(section, persisted);
   }
   void ensureMyGamesForCurrentUser(section);
   return section;
@@ -151,6 +162,7 @@ async function loadMyGamesForUser(
       .join(''),
   };
   myGamesSnapshots.set(userKey, snapshot);
+  persistSnapshot('mygames', snapshot);
   updateCurrentMyGamesSection(userKey, snapshot, section);
 }
 

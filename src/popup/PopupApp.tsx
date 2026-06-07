@@ -154,6 +154,13 @@ const FEATURES: FeatureRow[] = [
       'Adds a private notes card on other users\' profiles where you can record a personal nickname and a free-form note. The nickname appears as a (cosmetic) tag next to that user\'s displayed name across SviBlox surfaces. Stored locally; never sent anywhere.',
   },
   {
+    key: 'showFriendCategories',
+    label: 'Friend categories',
+    category: 'profile',
+    summary:
+      'Lets you create and assign connection types directly from the Roblox friends page. Higher-priority categories are bumped forward on the home friends rail and get a premium avatar ring. Stored locally; never sent anywhere.',
+  },
+  {
     key: 'showThemes',
     label: 'Themes page',
     category: 'extras',
@@ -490,8 +497,13 @@ export function PopupApp() {
       <HotkeySection
         hotkeys={settings.gameHotkeys ?? {}}
         foldersState={foldersState}
+        carouselHoldKey={settings.carouselScrollHoldKey ?? ''}
         onChange={async (next) => {
           const updated = await setSettings({ gameHotkeys: next });
+          setLocal(updated);
+        }}
+        onCarouselHoldKeyChange={async (key) => {
+          const updated = await setSettings({ carouselScrollHoldKey: key });
           setLocal(updated);
         }}
       />
@@ -506,11 +518,20 @@ export function PopupApp() {
 interface HotkeySectionProps {
   hotkeys: Record<string, string>;
   foldersState: FoldersState;
+  carouselHoldKey: string;
   onChange: (next: Record<string, string>) => Promise<void> | void;
+  onCarouselHoldKeyChange: (key: string) => Promise<void> | void;
 }
 
-function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) {
+function HotkeySection({
+  hotkeys,
+  foldersState,
+  carouselHoldKey,
+  onChange,
+  onCarouselHoldKeyChange,
+}: HotkeySectionProps) {
   const [adding, setAdding] = useState(false);
+  const [holdKeyListening, setHoldKeyListening] = useState(false);
   const [conflict, setConflict] = useState<{
     destId: string;
     key: string;
@@ -580,6 +601,45 @@ function HotkeySection({ hotkeys, foldersState, onChange }: HotkeySectionProps) 
         Single keystroke jumps to a section on the current game page or a site
         page. Hold <kbd>|</kbd> on roblox.com to see the full list overlay.
       </p>
+
+      <div className="sv-hotkey-holdkey">
+        <div className="sv-hotkey-holdkey-text">
+          <strong>Scroll carousels with the wheel</strong>
+          <span>
+            Hold this key while rolling the mouse wheel over a carousel (home
+            rows or game pages) to scroll it — wheel up = right, down = left.
+            Leave unset to keep the wheel normal.
+          </span>
+        </div>
+        <div className="sv-hotkey-holdkey-controls">
+          <KeyButton
+            keyChar={carouselHoldKey}
+            listening={holdKeyListening}
+            onStart={() => setHoldKeyListening(true)}
+            onCapture={async (newKey) => {
+              setHoldKeyListening(false);
+              if (newKey !== carouselHoldKey) await onCarouselHoldKeyChange(newKey);
+            }}
+            onCancel={() => setHoldKeyListening(false)}
+          />
+          {carouselHoldKey && (
+            <button
+              className="sv-hotkey-del"
+              type="button"
+              aria-label="Clear carousel scroll key"
+              onClick={() => void onCarouselHoldKeyChange('')}
+            >
+              ×
+            </button>
+          )}
+        </div>
+        {carouselHoldKey && usedKeys.get(carouselHoldKey)?.length ? (
+          <div className="sv-hotkey-inline-conflict">
+            {carouselHoldKey.toUpperCase()} is also a jump hotkey — holding it
+            will also trigger that. Pick a different key to avoid both firing.
+          </div>
+        ) : null}
+      </div>
 
       {entries.length === 0 && !adding && (
         <div className="sv-hotkey-empty">No hotkeys yet.</div>
@@ -1302,6 +1362,37 @@ const popupCss = `
     font-size: 12px;
     color: rgba(255,255,255,0.72);
   }
+  .sv-hotkey-holdkey {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 10px;
+    margin: 0 0 14px;
+    padding: 10px;
+    border-radius: 6px;
+    background: rgba(116, 64, 234, 0.10);
+    border: 1px solid rgba(116, 64, 234, 0.30);
+  }
+  .sv-hotkey-holdkey-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sv-hotkey-holdkey-text strong { font-size: 13px; }
+  .sv-hotkey-holdkey-text span {
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: rgba(255,255,255,0.68);
+  }
+  .sv-hotkey-holdkey-controls {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .sv-hotkey-holdkey .sv-hotkey-inline-conflict { flex-basis: 100%; }
   .sv-hotkey-blurb kbd {
     display: inline-flex;
     align-items: center;

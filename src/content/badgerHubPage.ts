@@ -889,6 +889,10 @@ function updateOverview(page: HTMLElement): void {
   const badgePct = hasBadgeTotals
     ? Math.round((summary.badgeOwned / summary.badgeTotal) * 100)
     : 0;
+  const hasLegacyBadgeTotals = summary.legacyBadgeTotal > 0;
+  const legacyBadgePct = hasLegacyBadgeTotals
+    ? Math.round((summary.legacyBadgeOwned / summary.legacyBadgeTotal) * 100)
+    : 0;
   const legacyPct = summary.legacyTotal > 0
     ? Math.round((summary.legacyCompleted / summary.legacyTotal) * 100)
     : 0;
@@ -903,6 +907,18 @@ function updateOverview(page: HTMLElement): void {
       <div class="bp-bh-overview-bar" role="progressbar" aria-label="Badger Hub badges owned" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${badgePct}">
         <div style="width:${badgePct}%"></div>
         <span>${hasBadgeTotals ? `${badgePct}%` : 'Run Scan badges'}</span>
+      </div>
+    </div>
+    <div class="bp-bh-overview-card">
+      <div class="bp-bh-overview-counts">
+        <strong>${summary.legacyBadgeOwned}</strong>
+        <span>/</span>
+        <span>${hasLegacyBadgeTotals ? summary.legacyBadgeTotal : '-'}</span>
+        <small>Legacy badges owned</small>
+      </div>
+      <div class="bp-bh-overview-bar" role="progressbar" aria-label="Legacy badges owned" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${legacyBadgePct}">
+        <div style="width:${legacyBadgePct}%"></div>
+        <span>${hasLegacyBadgeTotals ? `${legacyBadgePct}%` : 'Run Scan badges'}</span>
       </div>
     </div>
     <div class="bp-bh-overview-card">
@@ -923,11 +939,15 @@ function updateOverview(page: HTMLElement): void {
 function calculateOverview(): {
   badgeOwned: number;
   badgeTotal: number;
+  legacyBadgeOwned: number;
+  legacyBadgeTotal: number;
   legacyCompleted: number;
   legacyTotal: number;
 } {
   let badgeOwned = 0;
   let badgeTotal = 0;
+  let legacyBadgeOwned = 0;
+  let legacyBadgeTotal = 0;
   let legacyCompleted = 0;
   let legacyTotal = 0;
 
@@ -940,13 +960,17 @@ function calculateOverview(): {
     }
     if (game.legacy) {
       legacyTotal += 1;
+      if (progress) {
+        legacyBadgeOwned += progress.owned;
+        legacyBadgeTotal += progress.total;
+      }
       if (progress && progress.total > 0 && progress.owned >= progress.total) {
         legacyCompleted += 1;
       }
     }
   }
 
-  return { badgeOwned, badgeTotal, legacyCompleted, legacyTotal };
+  return { badgeOwned, badgeTotal, legacyBadgeOwned, legacyBadgeTotal, legacyCompleted, legacyTotal };
 }
 
 function updateProgressSlot(
@@ -1532,7 +1556,7 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-bh-unlocks-more { margin-top: 8px; }
     #${PAGE_ID} .bp-bh-overview {
-      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px; margin: 10px 0;
     }
     #${PAGE_ID} .bp-bh-overview-card {

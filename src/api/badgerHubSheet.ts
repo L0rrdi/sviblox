@@ -224,20 +224,68 @@ function extractBadgeLinks(editHtml: string): Array<{ badgeId: number; slug: str
 }
 
 /**
- * Attaches `badgeId` to each badge by matching its name-slug against the links
- * recovered from the edit HTML. Match-by-slug only (no positional fallback) so
- * an unlinked row never steals a later badge's link — correctness over coverage.
+ * Attaches `badgeId` to each badge using the links recovered from the edit HTML.
+ *
+ * Both `badges` (gviz rows) and `links` (first-occurrence of each id in the edit
+ * HTML) are in sheet-row order, which is what makes the positional step safe.
+ * Two passes:
+ *  1. **Slug anchors** — match each badge's name-slug to a link slug (the prior
+ *     behavior; preserves recovery for normally-named badges).
+ *  2. **Sandwich gap-fill** — between two consecutive slug anchors (and at the
+ *     head/tail), assign the leftover links to the still-unmatched rows *in
+ *     order*, but ONLY when the gap holds exactly as many unused links as
+ *     unmatched rows. This recovers rows whose names slug to nothing (non-Latin
+ *     / emoji / fancy-unicode), are empty, or are generic duplicates — without
+ *     ever off-by-one'ing into the wrong badge (count mismatch ⇒ leave unlinked).
  */
 function attachBadgeIds(badges: BadgerBadge[], links: Array<{ badgeId: number; slug: string }>): void {
   const used = new Array(links.length).fill(false);
-  const keyed = links.map((l) => slugKey(l.slug));
-  for (const b of badges) {
+  const linkKeys = links.map((l) => slugKey(l.slug));
+
+  // Pass 1: slug match (unchanged) — these become the anchors.
+  const matchedLink = new Map<number, number>(); // badgeIndex -> linkIndex
+  badges.forEach((b, bi) => {
     const key = slugKey(b.badge);
-    if (!key) continue;
-    const idx = keyed.findIndex((k, i) => !used[i] && k === key);
-    if (idx >= 0) {
-      used[idx] = true;
-      b.badgeId = links[idx].badgeId;
+    if (!key) return;
+    const li = linkKeys.findIndex((k, i) => !used[i] && k === key);
+    if (li >= 0) {
+      used[li] = true;
+      b.badgeId = links[li].badgeId;
+      matchedLink.set(bi, li);
+    }
+  });
+
+  // Pass 2: keep only anchors whose link index increases with badge index, so
+  // every gap between consecutive anchors is a clean, monotonic window.
+  const anchors: Array<{ bi: number; li: number }> = [];
+  let lastLi = -1;
+  for (const bi of [...matchedLink.keys()].sort((a, b) => a - b)) {
+    const li = matchedLink.get(bi)!;
+    if (li > lastLi) {
+      anchors.push({ bi, li });
+      lastLi = li;
+    }
+  }
+
+  // Pass 3: sandwich gap-fill between consecutive anchors, with virtual anchors
+  // at both ends, guarded by exact count equality.
+  const bounds = [{ bi: -1, li: -1 }, ...anchors, { bi: badges.length, li: links.length }];
+  for (let k = 0; k < bounds.length - 1; k++) {
+    const L = bounds[k];
+    const R = bounds[k + 1];
+    const gapBadges: number[] = [];
+    for (let bi = L.bi + 1; bi < R.bi; bi++) {
+      if (!badges[bi].badgeId) gapBadges.push(bi);
+    }
+    if (!gapBadges.length) continue;
+    const gapLinks: number[] = [];
+    for (let li = L.li + 1; li < R.li; li++) {
+      if (!used[li]) gapLinks.push(li);
+    }
+    if (gapBadges.length !== gapLinks.length) continue; // ambiguous → leave unlinked
+    for (let n = 0; n < gapBadges.length; n++) {
+      badges[gapBadges[n]].badgeId = links[gapLinks[n]].badgeId;
+      used[gapLinks[n]] = true;
     }
   }
 }

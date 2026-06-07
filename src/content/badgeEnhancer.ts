@@ -2,7 +2,7 @@ import { getAuthenticatedUserId } from '@/api/users';
 import { getGameInfo, placeIdToUniverseId } from '@/api/games';
 import { getGameBadges, getUserBadgeAwardedDates, BadgeDetail } from '@/api/badges';
 import { getBadgeIcons } from '@/api/thumbnails';
-import { getSettings } from '@/storage/settingsStore';
+import { getSettings, setSettings } from '@/storage/settingsStore';
 import { escapeAttr, escapeHtml } from '@/util/html';
 
 const STYLE_ID = 'bloxplus-badges-style';
@@ -11,6 +11,7 @@ const HIDDEN_ATTR = 'data-bp-badge-hidden';
 
 type BadgeFilter = 'all' | 'owned' | 'unowned';
 type BadgeSort = 'default' | 'rarest' | 'most-won' | 'won-yesterday' | 'recently-earned';
+type BadgeView = 'list' | 'grid';
 
 let renderedFor: number | null = null;
 let inFlight = false;
@@ -25,6 +26,7 @@ interface RenderState {
   sort: BadgeSort;
   searchQuery: string;
   colorRarity: boolean;
+  view: BadgeView;
 }
 let state: RenderState | null = null;
 
@@ -145,6 +147,7 @@ export async function run(): Promise<void> {
       sort: state?.sort ?? 'default',
       searchQuery: state?.searchQuery ?? '',
       colorRarity: Boolean(settings.showBadgeRarityColors),
+      view: settings.badgeView === 'grid' ? 'grid' : 'list',
     };
     renderSection(section);
     renderedFor = placeId;
@@ -355,12 +358,54 @@ function ensureStyle(): void {
     }
 
     @media (max-width: 700px) {
-      .bp-badge-row {
+      .bp-badges-list:not(.bp-grid) .bp-badge-row {
         grid-template-columns: 80px 1fr;
         grid-template-rows: auto auto;
       }
-      .bp-badge-stats { grid-column: 1 / -1; justify-content: space-around; }
+      .bp-badges-list:not(.bp-grid) .bp-badge-stats {
+        grid-column: 1 / -1; justify-content: space-around;
+      }
     }
+
+    /* ---- View toggle (list / grid) ---- */
+    .bp-badges-view {
+      display: inline-flex; align-items: stretch;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; overflow: hidden;
+    }
+    .bp-view-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 28px; padding: 0;
+      background: #1a1d24; color: #b0b6c0; border: 0; cursor: pointer;
+    }
+    .bp-view-btn + .bp-view-btn { border-left: 1px solid rgba(255,255,255,0.18); }
+    .bp-view-btn:hover { background: #222630; color: #e6e6e6; }
+    .bp-view-btn.bp-active { background: rgba(74,144,226,0.42); color: #fff; }
+    .bp-view-btn svg { width: 15px; height: 15px; display: block; }
+
+    /* ---- Grid (card) layout: same DOM, stacked vertically ---- */
+    .bp-badges-list.bp-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+      gap: 12px;
+    }
+    .bp-badges-list.bp-grid .bp-badge-row {
+      display: flex; flex-direction: column; align-items: center;
+      text-align: center; gap: 8px; padding: 14px 12px;
+    }
+    .bp-badges-list.bp-grid .bp-badge-img { width: 96px; height: 96px; }
+    .bp-badges-list.bp-grid .bp-badge-content { width: 100%; min-width: 0; }
+    .bp-badges-list.bp-grid .bp-badge-name {
+      font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .bp-badges-list.bp-grid .bp-badge-desc {
+      font-size: 12px; -webkit-line-clamp: 2; min-height: 0;
+    }
+    .bp-badges-list.bp-grid .bp-badge-stats {
+      width: 100%; justify-content: space-around; gap: 6px; flex-wrap: wrap;
+    }
+    .bp-badges-list.bp-grid .bp-stat-block { min-width: 48px; }
+    .bp-badges-list.bp-grid .bp-stat-value { font-size: 13px; }
   `;
   document.head.appendChild(style);
 }
@@ -394,8 +439,18 @@ function renderSection(section: HTMLElement): void {
           value="${escapeAttr(state.searchQuery)}" autocomplete="off" spellcheck="false">
       </label>
       <span class="bp-badges-shown"></span>
+      <div class="bp-badges-view" role="group" aria-label="Badge view">
+        <button type="button" class="bp-view-btn bp-view-list ${state.view === 'list' ? 'bp-active' : ''}"
+          data-view="list" title="List view" aria-label="List view" aria-pressed="${state.view === 'list'}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="2.5" width="14" height="2.6" rx="1"/><rect x="1" y="6.7" width="14" height="2.6" rx="1"/><rect x="1" y="10.9" width="14" height="2.6" rx="1"/></svg>
+        </button>
+        <button type="button" class="bp-view-btn bp-view-grid ${state.view === 'grid' ? 'bp-active' : ''}"
+          data-view="grid" title="Grid view" aria-label="Grid view" aria-pressed="${state.view === 'grid'}">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="6" height="6" rx="1.2"/><rect x="9" y="1" width="6" height="6" rx="1.2"/><rect x="1" y="9" width="6" height="6" rx="1.2"/><rect x="9" y="9" width="6" height="6" rx="1.2"/></svg>
+        </button>
+      </div>
     </div>
-    <div class="bp-badges-list"></div>
+    <div class="bp-badges-list ${state.view === 'grid' ? 'bp-grid' : ''}"></div>
   `;
 
   const filterEl = section.querySelector('.bp-filter') as HTMLSelectElement;
@@ -421,6 +476,25 @@ function renderSection(section: HTMLElement): void {
     state.searchQuery = searchEl.value;
     renderBadgeResults(section);
   });
+
+  // View toggle (list / grid). Pure layout switch — toggles a class on the same
+  // DOM, so no re-render or refetch. Choice persists in settings.
+  const listEl = section.querySelector<HTMLElement>('.bp-badges-list');
+  for (const btn of section.querySelectorAll<HTMLButtonElement>('.bp-view-btn')) {
+    btn.addEventListener('click', () => {
+      if (!state) return;
+      const view = btn.dataset.view === 'grid' ? 'grid' : 'list';
+      if (view === state.view) return;
+      state.view = view;
+      listEl?.classList.toggle('bp-grid', view === 'grid');
+      for (const b of section.querySelectorAll<HTMLButtonElement>('.bp-view-btn')) {
+        const active = b.dataset.view === view;
+        b.classList.toggle('bp-active', active);
+        b.setAttribute('aria-pressed', String(active));
+      }
+      void setSettings({ badgeView: view });
+    });
+  }
 }
 
 function applyFilterSort(s: RenderState): BadgeDetail[] {

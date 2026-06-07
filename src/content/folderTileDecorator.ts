@@ -52,7 +52,7 @@ function decorateNativeTiles(): void {
     // them as decorated so we don't double up, but don't inject.
     const isSviBloxTile = tile.classList.contains('bp-fav-tile');
     if (isSviBloxTile) {
-      tile.setAttribute(DECORATED_ATTR, '1');
+      if (tile.getAttribute(DECORATED_ATTR) !== '1') tile.setAttribute(DECORATED_ATTR, '1');
       continue;
     }
     const link = tile.querySelector<HTMLAnchorElement>('a.game-card-link');
@@ -85,10 +85,28 @@ function decorateNativeTiles(): void {
     const placeId = placeIdMatch ? placeIdMatch[1] : '';
     const img = tile.querySelector<HTMLImageElement>('img');
     const name = img?.alt ?? tile.querySelector('.game-card-name')?.textContent?.trim() ?? '';
+    const inFolder = foldedUniverseIds.has(universeId);
+
+    // Already decorated with this exact state → no-op. Re-writing the dataset /
+    // attributes / class on every pass produced tens of thousands of needless
+    // DOM mutations as Roblox churned its tiles, jamming the main thread (and
+    // janking video backgrounds). Only touch the DOM when something changed.
+    const existing = tile.querySelector<HTMLButtonElement>('.bp-tile-add-folder-injected');
+    if (
+      existing &&
+      existing.parentElement === thumb &&
+      tile.getAttribute(DECORATED_ATTR) === String(universeId) &&
+      existing.dataset.bpAddFolder === String(universeId) &&
+      existing.dataset.bpAddFolderName === name &&
+      (existing.dataset.bpAddFolderPlace ?? '') === placeId &&
+      existing.classList.contains('bp-in-folder') === inFolder
+    ) {
+      continue;
+    }
 
     if (getComputedStyle(thumb).position === 'static') thumb.style.position = 'relative';
 
-    let btn = tile.querySelector<HTMLButtonElement>('.bp-tile-add-folder-injected');
+    let btn = existing;
     if (!btn) {
       btn = document.createElement('button');
       btn.type = 'button';
@@ -97,16 +115,20 @@ function decorateNativeTiles(): void {
       btn.title = 'Add to folder';
       btn.innerHTML = ICON_HTML;
     }
-    btn.dataset.bpAddFolder = String(universeId);
-    btn.dataset.bpAddFolderName = name;
+    if (btn.dataset.bpAddFolder !== String(universeId)) btn.dataset.bpAddFolder = String(universeId);
+    if (btn.dataset.bpAddFolderName !== name) btn.dataset.bpAddFolderName = name;
     if (placeId) {
-      btn.dataset.bpAddFolderPlace = placeId;
-    } else {
+      if (btn.dataset.bpAddFolderPlace !== placeId) btn.dataset.bpAddFolderPlace = placeId;
+    } else if (btn.dataset.bpAddFolderPlace !== undefined) {
       delete btn.dataset.bpAddFolderPlace;
     }
-    btn.classList.toggle('bp-in-folder', foldedUniverseIds.has(universeId));
+    if (btn.classList.contains('bp-in-folder') !== inFolder) {
+      btn.classList.toggle('bp-in-folder', inFolder);
+    }
     if (btn.parentElement !== thumb) thumb.appendChild(btn);
-    tile.setAttribute(DECORATED_ATTR, String(universeId));
+    if (tile.getAttribute(DECORATED_ATTR) !== String(universeId)) {
+      tile.setAttribute(DECORATED_ATTR, String(universeId));
+    }
   }
 }
 
@@ -185,8 +207,16 @@ function syncIcons(): void {
 function installObserver(): void {
   if (observerInstalled) return;
   observerInstalled = true;
+  // Coalesce a burst of Roblox mutations into a single decoration pass per
+  // frame instead of re-scanning every tile on every mutation.
+  let scheduled = false;
   const obs = new MutationObserver(() => {
-    decorateNativeTiles();
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      decorateNativeTiles();
+    });
   });
   obs.observe(document.body, { childList: true, subtree: true });
 }

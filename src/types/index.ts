@@ -140,6 +140,13 @@ export interface Settings {
    */
   showProfileNotes: boolean;
   /**
+   * Friend categories: a "Categories" tab on /users/friends to sort friends
+   * into named, prioritized categories (premade "Best friend" plus custom
+   * ones), and a colored category chip + priority reordering on the home page
+   * friends rail. Stored locally in `bloxplus.friendCategories`.
+   */
+  showFriendCategories: boolean;
+  /**
    * Single-key hotkeys mapping `destinationId -> keyChar`. Destinations are
    * the well-known IDs in `src/content/hotkeyDestinations.ts` or dynamic
    * `folder-game:{universeId}` IDs for games saved in local folders. Keys are
@@ -165,6 +172,20 @@ export interface Settings {
    * hidden item is still visually distracting.
    */
   customizeShowHiddenInMode: boolean;
+  /**
+   * Hold-to-activate key for wheel-scrolling horizontal carousels (home rows +
+   * native Roblox carousels). While this key is held, rolling the mouse wheel
+   * over a carousel scrolls it (up = right, down = left). Empty string = the
+   * feature is off (the wheel behaves normally). Stored as a single lowercase
+   * printable char, same format as `gameHotkeys` values.
+   */
+  carouselScrollHoldKey: string;
+  /**
+   * Layout of the SviBlox game-page badge view: `'list'` (default — horizontal
+   * rows) or `'grid'` (vertical cards). Toggled by the icon buttons in the
+   * badge controls bar.
+   */
+  badgeView: 'list' | 'grid';
 }
 
 export type UhblTier = 'SS' | 'S' | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'N/A';
@@ -219,6 +240,7 @@ export const DEFAULT_SETTINGS: Settings = {
   uhblOverlayBackground: 'transparent',
   showCustomize: false,
   showProfileNotes: false,
+  showFriendCategories: false,
   gameHotkeys: {},
   themeId: 'default',
   themeSchedule: {
@@ -231,4 +253,6 @@ export const DEFAULT_SETTINGS: Settings = {
   homeWidgetWindow: 'all',
   hideMostPlayedWidget: false,
   customizeShowHiddenInMode: false,
+  carouselScrollHoldKey: '',
+  badgeView: 'list',
 };

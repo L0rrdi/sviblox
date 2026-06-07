@@ -1,4 +1,8 @@
 import { robloxFetch } from './robloxClient';
+import { cacheGetMany, cacheSetMany } from '@/storage/cacheStore';
+
+const GAME_INFO_TTL = 5 * 60_000;
+const GAME_VOTES_TTL = 5 * 60_000;
 
 export async function placeIdToUniverseId(placeId: number): Promise<number | null> {
   try {
@@ -35,23 +39,41 @@ interface GameVotesResponse {
   data: GameVote[];
 }
 
+/**
+ * Per-id cached. The cache key is `gameInfo:{universeId}` (not the joined id
+ * set), so overlapping-but-different request sets across the home sections
+ * share cached entries and a return visit reads everything from one batched
+ * storage get. Only the cache misses hit the network, batched ≤50.
+ */
 export async function getGameInfo(universeIds: number[]): Promise<Map<number, GameInfo>> {
   const out = new Map<number, GameInfo>();
   if (!universeIds.length) return out;
+  const ids = [...new Set(universeIds)];
 
-  for (let i = 0; i < universeIds.length; i += 50) {
-    const batch = universeIds.slice(i, i + 50);
+  const cached = await cacheGetMany<GameInfo>(ids.map((id) => `gameInfo:${id}`));
+  const misses: number[] = [];
+  for (const id of ids) {
+    const hit = cached.get(`gameInfo:${id}`);
+    if (hit) out.set(id, hit);
+    else misses.push(id);
+  }
+  if (!misses.length) return out;
+
+  const toCache: Array<readonly [string, GameInfo]> = [];
+  for (let i = 0; i < misses.length; i += 50) {
+    const batch = misses.slice(i, i + 50);
     const url = `https://games.roblox.com/v1/games?universeIds=${batch.join(',')}`;
     try {
-      const data = await robloxFetch<GamesResponse>(url, {
-        cacheKey: `gameInfo:${batch.join(',')}`,
-        cacheTtlMs: 5 * 60_000,
-      });
-      for (const g of data.data ?? []) out.set(g.id, g);
+      const data = await robloxFetch<GamesResponse>(url, { cacheTtlMs: GAME_INFO_TTL });
+      for (const g of data.data ?? []) {
+        out.set(g.id, g);
+        toCache.push([`gameInfo:${g.id}`, g]);
+      }
     } catch {
       // continue with next batch
     }
   }
+  if (toCache.length) void cacheSetMany(toCache, GAME_INFO_TTL);
   return out;
 }
 
@@ -85,22 +107,35 @@ export async function getUniversePlaces(universeId: number): Promise<UniversePla
   return out;
 }
 
+/** Per-id cached — same scheme as {@link getGameInfo}. */
 export async function getGameVotes(universeIds: number[]): Promise<Map<number, GameVote>> {
   const out = new Map<number, GameVote>();
   if (!universeIds.length) return out;
+  const ids = [...new Set(universeIds)];
 
-  for (let i = 0; i < universeIds.length; i += 50) {
-    const batch = universeIds.slice(i, i + 50);
+  const cached = await cacheGetMany<GameVote>(ids.map((id) => `gameVotes:${id}`));
+  const misses: number[] = [];
+  for (const id of ids) {
+    const hit = cached.get(`gameVotes:${id}`);
+    if (hit) out.set(id, hit);
+    else misses.push(id);
+  }
+  if (!misses.length) return out;
+
+  const toCache: Array<readonly [string, GameVote]> = [];
+  for (let i = 0; i < misses.length; i += 50) {
+    const batch = misses.slice(i, i + 50);
     const url = `https://games.roblox.com/v1/games/votes?universeIds=${batch.join(',')}`;
     try {
-      const data = await robloxFetch<GameVotesResponse>(url, {
-        cacheKey: `gameVotes:${batch.join(',')}`,
-        cacheTtlMs: 5 * 60_000,
-      });
-      for (const v of data.data ?? []) out.set(v.id, v);
+      const data = await robloxFetch<GameVotesResponse>(url, { cacheTtlMs: GAME_VOTES_TTL });
+      for (const v of data.data ?? []) {
+        out.set(v.id, v);
+        toCache.push([`gameVotes:${v.id}`, v]);
+      }
     } catch {
       // continue with next batch
     }
   }
+  if (toCache.length) void cacheSetMany(toCache, GAME_VOTES_TTL);
   return out;
 }
