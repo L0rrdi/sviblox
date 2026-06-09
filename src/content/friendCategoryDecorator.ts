@@ -288,48 +288,82 @@ function ensureStyle(): void {
       background-color: var(--bp-fcat-inner, #fff) !important;
       background-image: none !important;
       box-sizing: border-box !important;
+      /* Soft, edgeless AMBIENT glow — c1 inner / c2 outer so both colors read.
+         Kept deliberately dim: this layer does NOT animate (box-shadow paints are
+         not GPU-cheap, so the pulse lives on the ::before/::after pseudos). If
+         this is too bright it masks the breathing — see the halo-pulse note. */
       box-shadow:
-        0 0 12px 2px color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 72%, transparent),
-        0 0 28px 9px color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 56%, transparent),
-        0 0 48px 14px color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 28%, transparent) !important;
+        0 0 15px 2px color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 56%, transparent),
+        0 0 28px 8px color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 52%, transparent),
+        0 0 54px 17px color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 36%, transparent),
+        0 0 88px 28px color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 20%, transparent) !important;
     }
+    /* Wide, heavily-blurred bloom bleed — the soft light that spills outward. */
     .${RING_CLASS}::before {
       content: "";
       position: absolute;
-      inset: -18px;
+      inset: -24px;
       z-index: 0;
       pointer-events: none;
       border-radius: 50%;
       background: radial-gradient(
         circle,
-        transparent 66%,
-        color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 82%, transparent) 74%,
-        color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 48%, var(--bp-fcat-c2, #6f55ff)) 82%,
-        color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 76%, transparent) 91%,
+        transparent 42%,
+        color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 65%, transparent) 55%,
+        color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 95%, transparent) 71%,
+        color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 72%, transparent) 88%,
         transparent 100%
       );
-      filter: blur(2.5px);
-      opacity: 0.98;
-      transform: scale(0.96);
-      animation: bp-fcat-halo-pulse 2.4s ease-in-out infinite;
+      filter: blur(11px) saturate(2);
+      opacity: 0.95;
+      animation: bp-fcat-halo-pulse 2.8s ease-in-out infinite;
       animation-play-state: running !important;
-      will-change: transform, opacity;
+      will-change: opacity;
+    }
+    /* Soft inner glow that fades from the avatar edge — translucent so it melts
+       into the outer bloom instead of reading as a distinct solid ring. */
+    .${RING_CLASS}::after {
+      content: "";
+      position: absolute;
+      inset: -8px;
+      z-index: 0;
+      pointer-events: none;
+      border-radius: 50%;
+      background: radial-gradient(
+        circle,
+        transparent 46%,
+        color-mix(in srgb, var(--bp-fcat-c1, #ff5aa5) 82%, transparent) 60%,
+        color-mix(in srgb, var(--bp-fcat-c2, #6f55ff) 84%, transparent) 80%,
+        transparent 100%
+      );
+      filter: blur(6px) saturate(1.9);
+      opacity: 0.92;
+      animation: bp-fcat-core-pulse 2.8s ease-in-out infinite;
+      animation-play-state: running !important;
+      will-change: opacity;
     }
     .${RING_CLASS} img {
       position: relative !important;
       z-index: 1 !important;
       border-radius: inherit !important;
     }
+    /* Opacity-only breathe — NO transform. Animating scale() on a filter:blur()
+       layer is not reliably compositor-accelerated (re-rasters under load) and
+       froze entirely under video themes; opacity is the one property that always
+       composites. This also makes the pulse far subtler (no size swing). */
     @keyframes bp-fcat-halo-pulse {
-      0%, 100% {
-        opacity: 0.72;
-        transform: scale(0.94);
-      }
-      50% {
-        opacity: 1;
-        transform: scale(1.08);
-      }
+      0%, 100% { opacity: 0.5; }
+      50%      { opacity: 1; }
     }
+    @keyframes bp-fcat-core-pulse {
+      0%, 100% { opacity: 0.62; }
+      50%      { opacity: 0.95; }
+    }
+    /* No prefers-reduced-motion guard: the pulse is opacity-only (a gentle
+       brightness breathe, not movement/parallax/scale), which is not a
+       vestibular motion trigger — and Windows users with "Animation effects"
+       off (→ prefers-reduced-motion: reduce) were getting a frozen static halo
+       instead of the breathe. Keep this opacity-only so it stays acceptable. */
     .friends-carousel-list-container,
     .friends-carousel-container,
     .react-friends-carousel-container,

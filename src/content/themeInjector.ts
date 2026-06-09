@@ -7,6 +7,33 @@ const STYLE_ID = 'bloxplus-theme-style';
 const PREVIEW_STYLE_ID = 'bloxplus-theme-preview';
 const BG_OVERLAY_ID = 'bloxplus-theme-bg';
 const CLASSIC_LOGO_URL = chrome.runtime.getURL('public/icons/classicroblox.png');
+// Synchronous snapshot of the last-applied theme CSS, mirrored into page-origin
+// localStorage so the next page load can paint the theme at document_start —
+// before Roblox renders — instead of flashing the default look. See
+// `injectBootStyles` + the mirror in `applyCurrent`.
+const BOOT_CSS_KEY = 'bloxplus.bootCss';
+
+/**
+ * Inject the last-applied theme CSS synchronously at document_start (read from
+ * page-origin localStorage) so the page paints themed immediately. Reuses the
+ * canonical `STYLE_ID` element, which `applyCurrent` later finds, moves into
+ * <head>, and reconciles against real (async) settings. Safe to call before
+ * <head>/<body> exist — falls back to `document.documentElement`. No-op when
+ * there's no snapshot (e.g. no theme ever applied, or localStorage blocked).
+ */
+export function injectBootStyles(): void {
+  try {
+    if (document.getElementById(STYLE_ID)) return;
+    const css = localStorage.getItem(BOOT_CSS_KEY);
+    if (!css) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {
+    // localStorage unavailable / blocked — skip the boot paint, no harm.
+  }
+}
 
 type ThemeVarKey = 'background' | 'nav' | 'text' | 'accent';
 
@@ -3873,6 +3900,11 @@ async function applyCurrent(): Promise<void> {
   if (!style) {
     style = document.createElement('style');
     style.id = STYLE_ID;
+  }
+  // Keep the theme style last in <head> for correct cascade — the document_start
+  // boot inject (injectBootStyles) may have appended it to documentElement
+  // before <head> existed, which would let Roblox's own head styles win.
+  if (style.parentElement !== document.head) {
     document.head.appendChild(style);
   }
   // Any user-saved preset (id `custom`, `custom-2`, …) renders through the
@@ -3880,7 +3912,14 @@ async function applyCurrent(): Promise<void> {
   // preset ids stay as-is so era-specific CSS (Classic 2016 etc.) keeps firing.
   const isBuiltIn = PRESETS.some((p) => p.id === settings.themeId);
   const effectiveThemeId = isBuiltIn ? settings.themeId : 'custom';
-  style.textContent = buildCss(effectiveThemeId, custom);
+  const css = buildCss(effectiveThemeId, custom);
+  style.textContent = css;
+  // Mirror to localStorage so the next load can paint this theme instantly.
+  try {
+    localStorage.setItem(BOOT_CSS_KEY, css);
+  } catch {
+    // localStorage full/blocked — skip the boot snapshot.
+  }
   applyBackgroundImage(custom, effectiveThemeId);
   // Production builds drop `classic-2016` from PRESETS; gate the DOM tweaks
   // on the same DEV flag so a stray themeId from synced storage can't trigger

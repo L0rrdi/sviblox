@@ -1,9 +1,10 @@
 /**
  * Injects a "Customize" item into Roblox's native header settings dropdown
- * (`#settings-popover-menu`), right after the Settings link. Clicking it
- * sets the hash to `#bloxplus-customize` (entering customize mode in place,
- * regardless of the current path) and closes the dropdown via the
- * settings-icon toggle.
+ * (`#settings-popover-menu`), right after the Settings link. Clicking it calls
+ * `openCustomizeMode()` (which enters customize mode in place via `forcedActive`
+ * — and only sets the `#bloxplus-customize` hash when not already on another
+ * SviBlox overlay, so it doesn't kick the user out of Themes/UHBL/Badger) and
+ * closes the dropdown via the settings-icon toggle.
  *
  * Gated by `Settings.showCustomize`. Self-heals across React re-renders
  * because `run()` is called on every dispatch tick and is idempotent

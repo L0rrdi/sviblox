@@ -1335,7 +1335,24 @@ async function runAsync(host: HTMLElement): Promise<void> {
     return;
   }
   hideHomeContent(host);
+  revealHostAncestors(host);
   void mountPage(host);
+}
+
+/**
+ * On a hard reload at our hash, Roblox leaves `#content` (ancestor of
+ * `#HomeContainer`) at inline `display:none` — its loading gate it normally
+ * flips once the home feed renders, but never does because we hid that feed, so
+ * our overlay sits at height 0 ("disappeared"). Clear inline `display:none` up
+ * the ancestor chain. Idempotent; not restored on unmount (transient loading
+ * state). See the matching fix in badgerHubPage.ts.
+ */
+function revealHostAncestors(host: HTMLElement): void {
+  let el: HTMLElement | null = host;
+  while (el && el !== document.body) {
+    if (el.style.display === 'none') el.style.display = '';
+    el = el.parentElement;
+  }
 }
 
 /**

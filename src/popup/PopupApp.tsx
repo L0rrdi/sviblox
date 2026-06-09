@@ -161,6 +161,20 @@ const FEATURES: FeatureRow[] = [
       'Lets you create and assign connection types directly from the Roblox friends page. Higher-priority categories are bumped forward on the home friends rail and get a premium avatar ring. Stored locally; never sent anywhere.',
   },
   {
+    key: 'showFriendRemovals',
+    label: 'Unfriend detector',
+    category: 'profile',
+    summary:
+      'Shows a one-time popup when you load a Roblox page if someone has un-added you from their friends list since your last visit. Compares your friend list against a private local snapshot; nothing is sent anywhere.',
+  },
+  {
+    key: 'showFriendHoverCard',
+    label: 'Friend hover preview',
+    category: 'profile',
+    summary:
+      'Hovering a friend on the home page shows a floating preview card with their avatar, display name, @username, friends/followers/following counts, and join date.',
+  },
+  {
     key: 'showThemes',
     label: 'Themes page',
     category: 'extras',

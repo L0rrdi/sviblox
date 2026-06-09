@@ -13,6 +13,8 @@ export interface UserPresence {
   placeId?: number | null;
   rootPlaceId?: number | null;
   universeId?: number | null;
+  /** Instance (job) id of the server the user is in, when joinable. */
+  gameId?: string | null;
 }
 
 interface PresenceResponse {

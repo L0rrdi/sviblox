@@ -124,6 +124,45 @@ export async function renameCategory(id: string, name: string): Promise<void> {
   });
 }
 
+/**
+ * Patches an existing category's editable fields. Built-ins are editable
+ * (rename/recolor/etc.) but stay non-deletable. When `priority` changes the
+ * category is re-positioned by priority (mirroring createCategory) so the edit
+ * actually takes effect on the priority-ordered home rail.
+ */
+export async function updateCategory(
+  id: string,
+  patch: Partial<
+    Pick<FriendCategory, 'name' | 'color' | 'color2' | 'description' | 'priority' | 'icon' | 'emoji'>
+  >
+): Promise<void> {
+  await ensureFriendCategoriesPrimed();
+  const existing = cache.categories.find((c) => c.id === id);
+  if (!existing) return;
+  const updated: FriendCategory = {
+    ...existing,
+    ...(patch.name !== undefined
+      ? { name: patch.name.trim().slice(0, NAME_MAX) || existing.name }
+      : {}),
+    ...(patch.color !== undefined ? { color: normalizeColor(patch.color) } : {}),
+    ...(patch.color2 !== undefined ? { color2: normalizeColor(patch.color2) } : {}),
+    ...(patch.description !== undefined
+      ? { description: normalizeDescription(patch.description) }
+      : {}),
+    ...(patch.priority !== undefined ? { priority: normalizePriority(patch.priority) } : {}),
+    ...(patch.icon !== undefined ? { icon: normalizeIcon(patch.icon) } : {}),
+    ...(patch.emoji !== undefined ? { emoji: normalizeEmoji(patch.emoji) } : {}),
+  };
+  const priorityChanged = patch.priority !== undefined && updated.priority !== existing.priority;
+  const categories = priorityChanged
+    ? insertCategoryByPriority(
+        cache.categories.filter((c) => c.id !== id),
+        updated
+      )
+    : cache.categories.map((c) => (c.id === id ? updated : c));
+  await commit({ ...cache, categories });
+}
+
 export async function setCategoryColor(id: string, color: string): Promise<void> {
   await ensureFriendCategoriesPrimed();
   await commit({

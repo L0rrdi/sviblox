@@ -29,6 +29,8 @@ import * as profileNotesEnhancer from './profileNotesEnhancer';
 import * as friendNicknameDecorator from './friendNicknameDecorator';
 import * as friendCategoriesPage from './friendCategoriesPage';
 import * as friendCategoryDecorator from './friendCategoryDecorator';
+import * as friendRemovalNotifier from './friendRemovalNotifier';
+import * as friendHoverCard from './friendHoverCard';
 import * as hotkeysEnhancer from './hotkeysEnhancer';
 import * as favoritesPageEnhancer from './favoritesPageEnhancer';
 import * as customizeApplier from './customizeApplier';
@@ -37,20 +39,47 @@ import * as customizeMenuEntry from './customizeMenuEntry';
 import { install as installBannedProfileTrap } from './bannedProfileTrap';
 import { install as installCarouselWheelScroll } from './carouselWheelScroll';
 
-themesPage.install();
-uhblPage.install();
-badgerHubPage.install();
-customizeMode.install();
-customizeMenuEntry.install();
-friendCategoriesPage.install();
-// Always-on click listener that stashes any clicked /users/{id}/profile
-// userId so terminatedProfileEnhancer can recover it after Roblox redirects
-// a banned profile to /request-error. Idempotent.
-installBannedProfileTrap();
-installRoProStorageReader();
-// Single always-on wheel listener: rolling the wheel over a horizontal
-// carousel scrolls it (up = right arrow, down = left arrow).
-installCarouselWheelScroll();
+// Runs at document_start (manifest `run_at`). Paint the last-applied theme
+// synchronously from the localStorage snapshot *before* Roblox renders, so the
+// page doesn't flash the default look before our settings load. Everything else
+// touches the DOM (observers, some installs) and is deferred to `boot()` once
+// the document is ready.
+themeInjector.injectBootStyles();
+
+function boot(): void {
+  themesPage.install();
+  uhblPage.install();
+  badgerHubPage.install();
+  customizeMode.install();
+  customizeMenuEntry.install();
+  friendCategoriesPage.install();
+  friendHoverCard.install();
+  // Always-on click listener that stashes any clicked /users/{id}/profile
+  // userId so terminatedProfileEnhancer can recover it after Roblox redirects
+  // a banned profile to /request-error. Idempotent.
+  installBannedProfileTrap();
+  installRoProStorageReader();
+  // Single always-on wheel listener: rolling the wheel over a horizontal
+  // carousel scrolls it (up = right arrow, down = left arrow).
+  installCarouselWheelScroll();
+
+  observeRouteChanges(dispatch);
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync' && changes['bloxplus.settings']) {
+      dispatch();
+    }
+    if (area === 'local' && changes['bloxplus.customizations']) {
+      dispatch();
+    }
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', boot, { once: true });
+} else {
+  boot();
+}
 
 function dispatch(): void {
   void homeEnhancer.run();
@@ -72,6 +101,8 @@ function dispatch(): void {
   void friendNicknameDecorator.run();
   void friendCategoryDecorator.run();
   friendCategoriesPage.run();
+  friendRemovalNotifier.run();
+  friendHoverCard.run();
   void hotkeysEnhancer.run();
   void favoritesPageEnhancer.run();
   mutualsEnhancer.run();
@@ -92,17 +123,6 @@ function dispatch(): void {
   customizeMenuEntry.run();
   searchAutocomplete.run();
 }
-
-observeRouteChanges(dispatch);
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'sync' && changes['bloxplus.settings']) {
-    dispatch();
-  }
-  if (area === 'local' && changes['bloxplus.customizations']) {
-    dispatch();
-  }
-});
 
 function installRoProStorageReader(): void {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

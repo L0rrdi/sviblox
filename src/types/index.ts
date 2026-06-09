@@ -127,6 +127,16 @@ export interface Settings {
    */
   uhblOverlayBackground: 'transparent' | 'solid';
   /**
+   * Badger Hub: hide badges the signed-in user already owns. Applies when a
+   * game list is opened and while searching. Page-local UI preference.
+   */
+  badgerHubHideOwned: boolean;
+  /**
+   * Badger Hub: hide non-legacy games, leaving only the curated legacy rows.
+   * Page-local UI preference.
+   */
+  badgerHubHideNonLegacy: boolean;
+  /**
    * Adds the "Customize" entry to the header settings dropdown and lets
    * customize mode mount. Customize mode lets the user rename, hide, reorder,
    * and re-icon nav and header items, and add new entries. Master switch —
@@ -146,6 +156,19 @@ export interface Settings {
    * friends rail. Stored locally in `bloxplus.friendCategories`.
    */
   showFriendCategories: boolean;
+  /**
+   * Friend-removal notifier: once per page load, diffs your current friend list
+   * against the last snapshot and shows a one-time "Disconnect Detected" popup
+   * listing anyone who has un-added (unfriended) you since the last check.
+   * Snapshot stored locally per account in `bloxplus.friendsSnapshot`.
+   */
+  showFriendRemovals: boolean;
+  /**
+   * Friend hover-card: hovering a friend tile on the home page shows a floating
+   * preview card with their avatar, display name, @username, friends/followers/
+   * following counts, and join date.
+   */
+  showFriendHoverCard: boolean;
   /**
    * Single-key hotkeys mapping `destinationId -> keyChar`. Destinations are
    * the well-known IDs in `src/content/hotkeyDestinations.ts` or dynamic
@@ -238,9 +261,13 @@ export const DEFAULT_SETTINGS: Settings = {
   showThemes: true,
   showUhbl: true,
   uhblOverlayBackground: 'transparent',
+  badgerHubHideOwned: false,
+  badgerHubHideNonLegacy: false,
   showCustomize: false,
   showProfileNotes: false,
   showFriendCategories: false,
+  showFriendRemovals: true,
+  showFriendHoverCard: true,
   gameHotkeys: {},
   themeId: 'default',
   themeSchedule: {

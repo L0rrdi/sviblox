@@ -30,7 +30,7 @@ import {
 } from '@/api/badgerHubSheet';
 import { getAllUserBadges, getBadgeDetail, getUserBadgeAwardedDates } from '@/api/badges';
 import { getAuthenticatedUserId } from '@/api/users';
-import { getSettings, onSettingsChanged } from '@/storage/settingsStore';
+import { getSettings, setSettings, onSettingsChanged } from '@/storage/settingsStore';
 import { Settings } from '@/types';
 import { escapeHtml, escapeAttr } from '@/util/html';
 
@@ -183,7 +183,27 @@ async function runAsync(host: HTMLElement): Promise<void> {
     return;
   }
   hideHomeContent(host);
+  revealHostAncestors(host);
   void mountPage(host);
+}
+
+/**
+ * On a hard reload at our hash, Roblox leaves `#content` (an ancestor of
+ * `#HomeContainer`) at inline `display:none` — its loading-state gate that it
+ * normally flips once the home feed renders, but never does here because we've
+ * hidden that feed. Our overlay then sits in the DOM at height 0 and looks like
+ * it "disappeared" until the user re-navigates. Since our overlay replaces the
+ * home content, clear any inline `display:none` on the ancestor chain ourselves.
+ * Idempotent (only writes when actually `none`); not restored on unmount — the
+ * `none` was a transient loading state, and by the time the user leaves the
+ * overlay Roblox wants its (now-loaded) home visible anyway.
+ */
+function revealHostAncestors(host: HTMLElement): void {
+  let el: HTMLElement | null = host;
+  while (el && el !== document.body) {
+    if (el.style.display === 'none') el.style.display = '';
+    el = el.parentElement;
+  }
 }
 
 async function mountPage(host: HTMLElement): Promise<void> {
@@ -225,6 +245,14 @@ function applyDisplaySettings(page: HTMLElement, settings: Settings): void {
   const mode = normalizeBackgroundMode(settings.uhblOverlayBackground);
   page.classList.toggle('bp-bh-bg-solid', mode === 'solid');
   page.classList.toggle('bp-bh-bg-transparent', mode === 'transparent');
+  const hideOwned = Boolean(settings.badgerHubHideOwned);
+  page.classList.toggle('bp-bh-hide-owned', hideOwned);
+  const cb = page.querySelector<HTMLInputElement>('[data-bh-hide-owned]');
+  if (cb) cb.checked = hideOwned;
+  const hideNonLegacy = Boolean(settings.badgerHubHideNonLegacy);
+  page.classList.toggle('bp-bh-hide-nonlegacy', hideNonLegacy);
+  const cb2 = page.querySelector<HTMLInputElement>('[data-bh-hide-nonlegacy]');
+  if (cb2) cb2.checked = hideNonLegacy;
 }
 
 async function load(page: HTMLElement, loadId: number, forceRefresh: boolean): Promise<void> {
@@ -284,6 +312,14 @@ function renderSkeleton(page: HTMLElement): void {
       <div class="bp-bh-search-row">
         <input type="search" class="bp-bh-search" placeholder="Search list name..." data-bh-list-search />
         <input type="search" class="bp-bh-search" placeholder="Search game name..." data-bh-game-search />
+      </div>
+      <div class="bp-bh-options">
+        <label class="bp-bh-hideowned" title="Hide badges you already own when opening a list or searching.">
+          <input type="checkbox" data-bh-hide-owned /> Hide owned badges
+        </label>
+        <label class="bp-bh-hideowned" title="Show only curated legacy games; hide everything else.">
+          <input type="checkbox" data-bh-hide-nonlegacy /> Hide non-legacy
+        </label>
       </div>
       <div class="bp-bh-overview" data-bh-overview></div>
     </header>
@@ -351,6 +387,19 @@ function renderSkeleton(page: HTMLElement): void {
   gameSearch?.addEventListener('input', () => {
     state.gameQuery = gameSearch.value.trim().toLowerCase();
     scheduleGameSearch(page);
+  });
+  const hideOwned = page.querySelector<HTMLInputElement>('[data-bh-hide-owned]');
+  hideOwned?.addEventListener('change', () => {
+    page.classList.toggle('bp-bh-hide-owned', hideOwned.checked);
+    void setSettings({ badgerHubHideOwned: hideOwned.checked });
+    // Re-run an active game search so owned badges drop out of (or return to)
+    // the match-preview chips immediately.
+    if (state.gameQuery) void refreshGameSearchMatches(page);
+  });
+  const hideNonLegacy = page.querySelector<HTMLInputElement>('[data-bh-hide-nonlegacy]');
+  hideNonLegacy?.addEventListener('change', () => {
+    page.classList.toggle('bp-bh-hide-nonlegacy', hideNonLegacy.checked);
+    void setSettings({ badgerHubHideNonLegacy: hideNonLegacy.checked });
   });
 }
 
@@ -1363,17 +1412,36 @@ async function refreshGameSearchMatches(page: HTMLElement): Promise<void> {
     applyFilter(page);
     return;
   }
+  // When "Hide owned badges" is on, owned badges must not surface as search
+  // matches either — otherwise their match-preview chip stays on the list even
+  // though their badge row is hidden, and a list whose only match is owned would
+  // still appear. Build the owned id set from the persisted baseline plus any
+  // already-hydrated owned rows in the DOM (covers scanned + live-checked).
+  const ownedIds = page.classList.contains('bp-bh-hide-owned')
+    ? await collectOwnedBadgeIds(page)
+    : null;
+  if (seq !== gameSearchSeq) return;
   const nextMatches: Record<string, string[]> = {};
   await Promise.all(state.games.map(async (game) => {
     if (!game.docSheetId) return;
     const badges = await getCachedBadgerGameBadges(game.docSheetId, game.docGid);
     if (!badges?.length) return;
-    const matches = collectGameNameMatches(badges, q);
+    const matches = collectGameNameMatches(badges, q, ownedIds);
     if (matches.length) nextMatches[badgerProgressKey(game.docSheetId, game.docGid)] = matches;
   }));
   if (seq !== gameSearchSeq) return;
   state.gameMatches = nextMatches;
   if (page.isConnected) applyFilter(page);
+}
+
+/** Owned badge ids = persisted known-owned baseline ∪ already-hydrated owned rows. */
+async function collectOwnedBadgeIds(page: HTMLElement): Promise<Set<number>> {
+  const set = new Set<number>((await getKnownOwned()) ?? []);
+  for (const li of page.querySelectorAll<HTMLElement>('.bp-bh-badge[data-owned="1"][data-badge-id]')) {
+    const id = Number(li.dataset.badgeId);
+    if (Number.isFinite(id)) set.add(id);
+  }
+  return set;
 }
 
 function scheduleApplyFilter(page: HTMLElement): void {
@@ -1392,10 +1460,16 @@ function scheduleGameSearch(page: HTMLElement): void {
   }, SEARCH_DEBOUNCE_MS);
 }
 
-function collectGameNameMatches(badges: BadgerBadge[], query: string): string[] {
+function collectGameNameMatches(
+  badges: BadgerBadge[],
+  query: string,
+  ownedIds?: Set<number> | null
+): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const badge of badges) {
+    // Skip badges the user owns when hide-owned is active (no chip for them).
+    if (ownedIds && badge.badgeId && ownedIds.has(badge.badgeId)) continue;
     const candidates = [badge.resolvedGameName, badge.game].filter((v): v is string => !!v?.trim());
     for (const candidate of candidates) {
       if (!candidate.toLowerCase().includes(query)) continue;
@@ -1598,6 +1672,19 @@ function ensureStyle(): void {
       display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px; margin-top: 10px;
     }
+    #${PAGE_ID} .bp-bh-options {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-top: 10px;
+    }
+    #${PAGE_ID} .bp-bh-hideowned {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-size: 13px; font-weight: 600; opacity: 0.88; cursor: pointer; user-select: none;
+    }
+    #${PAGE_ID} .bp-bh-hideowned input { width: 15px; height: 15px; cursor: pointer; accent-color: #335fff; }
+    /* Hide-owned: drop rows the user owns from opened lists and search results. */
+    #${PAGE_ID}.bp-bh-hide-owned .bp-bh-badge[data-owned="1"] { display: none !important; }
+    /* Hide-non-legacy: show only curated legacy games. !important so it wins over
+       applyFilter's inline display on list rows. */
+    #${PAGE_ID}.bp-bh-hide-nonlegacy .bp-bh-game:not(.bp-bh-legacy) { display: none !important; }
     @media (max-width: 640px) {
       #${PAGE_ID} .bp-bh-overview { grid-template-columns: 1fr; }
       #${PAGE_ID} .bp-bh-search-row { grid-template-columns: 1fr; }

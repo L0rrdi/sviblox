@@ -25,7 +25,7 @@
     {
       "matches": ["https://www.roblox.com/*"],
       "js": ["src/content/router.ts"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     },
     {
       "matches": ["https://www.roblox.com/*"],

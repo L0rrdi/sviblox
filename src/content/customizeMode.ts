@@ -102,7 +102,13 @@ export function run(): void {
 
 export function openCustomizeMode(): void {
   forcedActive = true;
-  if (!isCustomizeRoute()) {
+  // Don't clobber a sibling SviBlox overlay hash (themes / uhbl / badger / …).
+  // Those pages tear themselves down on any hashchange away from their own
+  // route, so navigating to `#bloxplus-customize` kicks the user out of the
+  // page. `forcedActive` activates customize on top without navigating, so we
+  // leave the hash alone and the overlay stays mounted (and is still there
+  // when the user exits customize).
+  if (!isCustomizeRoute() && !isSviBloxOverlayHash()) {
     location.hash = ROUTE_HASH;
   }
   void runAsync();
@@ -121,6 +127,12 @@ async function runAsync(): Promise<void> {
 
 function isCustomizeRoute(): boolean {
   return location.hash.replace(/^#/, '') === ROUTE_HASH;
+}
+
+/** True when the current hash is some *other* SviBlox overlay route. */
+function isSviBloxOverlayHash(): boolean {
+  const hash = location.hash.replace(/^#/, '');
+  return hash.startsWith('bloxplus-') && hash !== ROUTE_HASH;
 }
 
 function enterMode(): void {

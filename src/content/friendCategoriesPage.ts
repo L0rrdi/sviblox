@@ -13,6 +13,8 @@ import {
   getCategoryForFriend,
   onFriendCategoriesChanged,
   createCategory,
+  updateCategory,
+  deleteCategory,
   assignFriend,
   FriendCategory,
   FRIEND_CATEGORY_LIMITS,
@@ -137,6 +139,31 @@ function handleDocumentClick(event: MouseEvent): void {
     return;
   }
 
+  const edit = target?.closest<HTMLElement>('[data-bp-fcat-edit]');
+  if (edit) {
+    event.preventDefault();
+    event.stopPropagation();
+    const userId = Number(edit.dataset.userId);
+    const categoryId = edit.dataset.categoryId;
+    if (categoryId) {
+      closeMenu();
+      openCustomPanel(Number.isFinite(userId) ? userId : 0, categoryId);
+    }
+    return;
+  }
+
+  const panelDelete = target?.closest<HTMLElement>('[data-bp-fcat-panel-delete]');
+  if (panelDelete) {
+    event.preventDefault();
+    event.stopPropagation();
+    const categoryId = panelDelete.dataset.categoryId;
+    if (categoryId) {
+      void deleteCategory(categoryId);
+      closeCustomPanel();
+    }
+    return;
+  }
+
   const panelClose = target?.closest<HTMLElement>('[data-bp-fcat-panel-close]');
   if (panelClose) {
     event.preventDefault();
@@ -225,19 +252,27 @@ function menuHtml(userId: number): string {
 function categoryItemHtml(userId: number, cat: FriendCategory, active: boolean): string {
   const [c1, c2] = categoryGradient(cat.color, cat.color2);
   return `
-    <button type="button" class="bp-fcat-menu-item${active ? ' bp-fcat-menu-item-active' : ''}"
-      data-bp-fcat-menu-item data-user-id="${userId}" data-category-id="${escapeAttr(cat.id)}"
-      style="--bp-fcat-c1:${escapeAttr(c1)};--bp-fcat-c2:${escapeAttr(c2)}">
-      <span class="bp-fcat-menu-icon bp-fcat-menu-swatch">${categoryIconHtml(cat)}</span>
-      <span class="bp-fcat-menu-copy">
-        <span class="bp-fcat-menu-name">${escapeHtml(cat.name)}</span>
-        <span class="bp-fcat-menu-sub">${
-          cat.description
-            ? escapeHtml(cat.description)
-            : `Assign this friend to ${escapeHtml(cat.name)}`
-        }</span>
-      </span>
-    </button>
+    <div class="bp-fcat-menu-row" style="--bp-fcat-c1:${escapeAttr(c1)};--bp-fcat-c2:${escapeAttr(
+      c2
+    )}">
+      <button type="button" class="bp-fcat-menu-item${active ? ' bp-fcat-menu-item-active' : ''}"
+        data-bp-fcat-menu-item data-user-id="${userId}" data-category-id="${escapeAttr(cat.id)}">
+        <span class="bp-fcat-menu-icon bp-fcat-menu-swatch">${categoryIconHtml(cat)}</span>
+        <span class="bp-fcat-menu-copy">
+          <span class="bp-fcat-menu-name">${escapeHtml(cat.name)}</span>
+          <span class="bp-fcat-menu-sub">${
+            cat.description
+              ? escapeHtml(cat.description)
+              : `Assign this friend to ${escapeHtml(cat.name)}`
+          }</span>
+        </span>
+      </button>
+      <button type="button" class="bp-fcat-menu-edit" data-bp-fcat-edit
+        data-user-id="${userId}" data-category-id="${escapeAttr(cat.id)}"
+        title="Edit ${escapeAttr(cat.name)}" aria-label="Edit ${escapeAttr(cat.name)}">
+        ${editIconSvg()}
+      </button>
+    </div>
   `;
 }
 
@@ -270,14 +305,17 @@ function closeMenu(): void {
   openUserId = null;
 }
 
-function openCustomPanel(userId: number): void {
+function openCustomPanel(userId: number, editCategoryId?: string): void {
   closeCustomPanel();
+  const editCat = editCategoryId
+    ? getFriendCategoriesState().categories.find((c) => c.id === editCategoryId) ?? null
+    : null;
   const panel = document.createElement('div');
   panel.id = PANEL_ID;
   panel.className = 'bp-fcat-panel-wrap';
-  panel.innerHTML = customPanelHtml(userId);
+  panel.innerHTML = customPanelHtml(userId, editCat);
   document.body.appendChild(panel);
-  bindCustomPanel(panel, userId);
+  bindCustomPanel(panel, userId, editCat);
   panel.querySelector<HTMLInputElement>('[name="label"]')?.focus();
 }
 
@@ -285,10 +323,17 @@ function closeCustomPanel(): void {
   document.getElementById(PANEL_ID)?.remove();
 }
 
-function customPanelHtml(userId: number): string {
+function customPanelHtml(userId: number, editCat: FriendCategory | null): string {
+  const isEdit = Boolean(editCat);
+  const color = editCat?.color ?? '#ff5aa5';
+  const color2 = editCat?.color2 ?? '#6f55ff';
+  const selectedIcon = editCat?.icon ?? 'user';
+  const priority = editCat?.priority ?? 50;
   return `
     <div class="bp-fcat-panel-backdrop" data-bp-fcat-panel-close></div>
-    <form class="bp-fcat-panel" data-user-id="${userId}">
+    <form class="bp-fcat-panel" data-user-id="${userId}"${
+      editCat ? ` data-edit-id="${escapeAttr(editCat.id)}"` : ''
+    }>
       <div class="bp-fcat-panel-head">
         <div>
           <h2>Manage Connection Types</h2>
@@ -297,47 +342,69 @@ function customPanelHtml(userId: number): string {
         <button type="button" class="bp-fcat-panel-x" data-bp-fcat-panel-close aria-label="Close">×</button>
       </div>
       <div class="bp-fcat-panel-body">
-        <h3>Create New Connection Type</h3>
+        <h3>${isEdit ? 'Edit Connection Type' : 'Create New Connection Type'}</h3>
         <label class="bp-fcat-field">
           <span>Label *</span>
           <input name="label" class="bp-fcat-input" maxlength="${FRIEND_CATEGORY_LIMITS.nameMax}"
-            placeholder="e.g., Colleague, Gaming Buddy" required />
+            placeholder="e.g., Colleague, Gaming Buddy" required value="${escapeAttr(
+              editCat?.name ?? ''
+            )}" />
         </label>
         <label class="bp-fcat-field">
           <span>Description *</span>
-          <textarea name="description" class="bp-fcat-textarea" maxlength="${FRIEND_CATEGORY_LIMITS.descriptionMax}"
-            placeholder="Describe this connection type..."></textarea>
+          <textarea name="description" class="bp-fcat-textarea" maxlength="${
+            FRIEND_CATEGORY_LIMITS.descriptionMax
+          }"
+            placeholder="Describe this connection type...">${escapeHtml(
+              editCat?.description ?? ''
+            )}</textarea>
         </label>
         <label class="bp-fcat-field bp-fcat-field-short">
           <span>Priority *</span>
-          <input name="priority" class="bp-fcat-number" type="number" min="0" max="1000" value="50" />
+          <input name="priority" class="bp-fcat-number" type="number" min="0" max="1000" value="${priority}" />
           <small>Higher values appear first (0-1000).</small>
         </label>
         <div class="bp-fcat-field">
           <span>Color *</span>
           <div class="bp-fcat-color-row">
-            <label><input name="color" type="color" value="#ff5aa5" /><span>#FF5AA5</span></label>
-            <label><input name="color2" type="color" value="#6f55ff" /><span>#6F55FF</span></label>
+            <label><input name="color" type="color" value="${escapeAttr(
+              color
+            )}" /><span>${escapeHtml(color.toUpperCase())}</span></label>
+            <label><input name="color2" type="color" value="${escapeAttr(
+              color2
+            )}" /><span>${escapeHtml(color2.toUpperCase())}</span></label>
           </div>
         </div>
         <div class="bp-fcat-field">
           <span>Icon</span>
-          <div class="bp-fcat-icon-grid" data-selected-icon="user">
+          <div class="bp-fcat-icon-grid" data-selected-icon="${escapeAttr(selectedIcon)}">
             ${ICON_OPTIONS.map(
-              ([id, glyph, label], index) => `
-                <button type="button" class="bp-fcat-icon-choice${index === 0 ? ' bp-fcat-icon-selected' : ''}"
-                  data-icon="${id}" title="${escapeAttr(label)}" aria-label="${escapeAttr(label)}">${glyph}</button>
+              ([id, glyph, label]) => `
+                <button type="button" class="bp-fcat-icon-choice${
+                  id === selectedIcon ? ' bp-fcat-icon-selected' : ''
+                }"
+                  data-icon="${id}" title="${escapeAttr(label)}" aria-label="${escapeAttr(
+                    label
+                  )}">${glyph}</button>
               `
             ).join('')}
           </div>
         </div>
         <label class="bp-fcat-field">
           <span>Custom Emoji (Optional)</span>
-          <input name="emoji" class="bp-fcat-input" maxlength="12" placeholder="💜 or any emoji" />
+          <input name="emoji" class="bp-fcat-input" maxlength="12" placeholder="💜 or any emoji" value="${escapeAttr(
+            editCat?.emoji ?? ''
+          )}" />
           <small>Use a custom emoji instead of the premade icons above.</small>
         </label>
         <div class="bp-fcat-panel-actions">
-          <button type="submit" class="bp-fcat-create">Create</button>
+          ${
+            editCat && !editCat.builtIn
+              ? `<button type="button" class="bp-fcat-delete" data-bp-fcat-panel-delete
+                  data-category-id="${escapeAttr(editCat.id)}">Delete</button>`
+              : ''
+          }
+          <button type="submit" class="bp-fcat-create">${isEdit ? 'Save' : 'Create'}</button>
           <button type="button" class="bp-fcat-cancel" data-bp-fcat-panel-close>Cancel</button>
         </div>
       </div>
@@ -345,7 +412,7 @@ function customPanelHtml(userId: number): string {
   `;
 }
 
-function bindCustomPanel(root: HTMLElement, userId: number): void {
+function bindCustomPanel(root: HTMLElement, userId: number, editCat: FriendCategory | null): void {
   const colorInputs = root.querySelectorAll<HTMLInputElement>('input[type="color"]');
   for (const input of colorInputs) {
     const label = input.nextElementSibling;
@@ -377,10 +444,24 @@ function bindCustomPanel(root: HTMLElement, userId: number): void {
     const priority = Number(data.get('priority') ?? 50);
     const emoji = String(data.get('emoji') ?? '').trim();
     const icon = grid?.dataset.selectedIcon ?? 'user';
-    void createCategory(name, color, color2, { description, priority, icon, emoji }).then((cat) => {
-      void assignFriend(userId, cat.id);
-      closeCustomPanel();
-    });
+    if (editCat) {
+      void updateCategory(editCat.id, {
+        name,
+        color,
+        color2,
+        description,
+        priority,
+        icon,
+        emoji,
+      }).then(closeCustomPanel);
+    } else {
+      void createCategory(name, color, color2, { description, priority, icon, emoji }).then(
+        (cat) => {
+          if (userId > 0) void assignFriend(userId, cat.id);
+          closeCustomPanel();
+        }
+      );
+    }
   });
 }
 
@@ -417,6 +498,15 @@ function assignIconSvg(): string {
       <circle cx="9" cy="7" r="4" />
       <path d="M19 8v6" />
       <path d="M22 11h-6" />
+    </svg>
+  `;
+}
+
+function editIconSvg(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
   `;
 }
@@ -502,6 +592,52 @@ function ensureStyle(): void {
     .bp-fcat-menu-item:hover,
     .bp-fcat-menu-item-active {
       background: rgba(255,255,255,0.07);
+    }
+    .bp-fcat-menu-row {
+      position: relative;
+    }
+    .bp-fcat-menu-row .bp-fcat-menu-item {
+      padding-right: 38px;
+    }
+    .bp-fcat-menu-edit {
+      position: absolute;
+      top: 50%;
+      right: 8px;
+      transform: translateY(-50%);
+      width: 26px;
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px;
+      background: rgba(255,255,255,0.04);
+      color: rgba(255,255,255,0.55);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+    }
+    .bp-fcat-menu-row:hover .bp-fcat-menu-edit,
+    .bp-fcat-menu-edit:focus-visible {
+      opacity: 1;
+    }
+    .bp-fcat-menu-edit:hover {
+      color: #fff;
+      border-color: color-mix(in srgb, var(--bp-fcat-c1, #8aa8ff) 60%, rgba(255,255,255,0.18));
+      background:
+        linear-gradient(rgba(36,38,40,0.9), rgba(36,38,40,0.9)) padding-box,
+        linear-gradient(135deg, var(--bp-fcat-c1, #ff5aa5), var(--bp-fcat-c2, #6f55ff)) border-box;
+    }
+    .bp-fcat-menu-edit svg {
+      width: 14px;
+      height: 14px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      pointer-events: none;
     }
     .bp-fcat-menu-icon {
       width: 22px;
@@ -741,6 +877,21 @@ function ensureStyle(): void {
       justify-content: flex-end;
       gap: 10px;
       padding-top: 4px;
+    }
+    .bp-fcat-delete {
+      margin-right: auto;
+      height: 36px;
+      padding: 0 15px;
+      border-radius: 5px;
+      border: 1px solid rgba(229,72,77,0.55);
+      background: rgba(229,72,77,0.14);
+      color: #ff8b8f;
+      font: 800 13px/1 Arial, Helvetica, sans-serif;
+      cursor: pointer;
+    }
+    .bp-fcat-delete:hover {
+      background: rgba(229,72,77,0.26);
+      color: #fff;
     }
     .bp-fcat-create,
     .bp-fcat-cancel {
