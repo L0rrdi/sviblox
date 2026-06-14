@@ -31,6 +31,14 @@ export interface AddedBadge {
   unresolved?: boolean;
 }
 
+/** A source-sheet badge the user explicitly saved from an opened list. */
+export interface SavedBadge {
+  badgeId: number;
+  game?: string;
+  badge: string;
+  badgeUrl?: string;
+}
+
 export interface BadgerGameAnnotation {
   tag?: BadgerTag;
   note?: string;
@@ -38,6 +46,8 @@ export interface BadgerGameAnnotation {
   gameUrl?: string;
   /** Custom badges the user added to this list. */
   addedBadges?: AddedBadge[];
+  /** Source-sheet badges the user checkmarked/saved in edit mode. */
+  savedBadges?: SavedBadge[];
   /** True when `tag` was applied by the dead-game scan (not the user). Lets a
    *  later scan auto-clear it when the game comes back alive; a user-set tag has
    *  no `auto` flag and is never auto-removed. */
@@ -238,6 +248,41 @@ export async function removeBadgerListBadge(key: string, addedId: string): Promi
   await chrome.storage.local.set({ [KEY]: cache });
 }
 
+export async function saveBadgerListSavedBadge(
+  key: string,
+  entry: { badgeId: number; game?: string; badge: string; badgeUrl?: string }
+): Promise<void> {
+  await ensureBadgerAnnotationsPrimed();
+  if (!Number.isFinite(entry.badgeId)) return;
+  const cur = { ...(cache.games[key] ?? {}) } as BadgerGameAnnotation;
+  const saved: SavedBadge = {
+    badgeId: entry.badgeId,
+    badge: entry.badge.trim().slice(0, 160) || `Badge ${entry.badgeId}`,
+    badgeUrl: sanitizeBadgerUrl(entry.badgeUrl),
+  };
+  const game = entry.game?.trim().slice(0, 120);
+  if (game) saved.game = game;
+  cur.savedBadges = [...(cur.savedBadges ?? []).filter((b) => b.badgeId !== saved.badgeId), saved];
+  cur.updatedAt = new Date().toISOString();
+  cache = { ...cache, games: { ...cache.games, [key]: cur } };
+  await chrome.storage.local.set({ [KEY]: cache });
+}
+
+export async function removeBadgerListSavedBadge(key: string, badgeId: number): Promise<void> {
+  await ensureBadgerAnnotationsPrimed();
+  const curRaw = cache.games[key];
+  if (!curRaw?.savedBadges) return;
+  const filtered = curRaw.savedBadges.filter((b) => b.badgeId !== badgeId);
+  const cur: BadgerGameAnnotation = { ...curRaw };
+  if (filtered.length) cur.savedBadges = filtered;
+  else delete cur.savedBadges;
+  const games = { ...cache.games };
+  if (hasContent(cur)) games[key] = { ...cur, updatedAt: new Date().toISOString() };
+  else delete games[key];
+  cache = { ...cache, games };
+  await chrome.storage.local.set({ [KEY]: cache });
+}
+
 /**
  * Batch-sets `tag` on many badge annotations in one write. Used by the dead-game
  * automation (Owner banned / Unrated / Private / …). Never overrides an existing
@@ -273,10 +318,10 @@ const DEAD_SCAN_TAGS = new Set(['banned', 'unrated', 'private', 'under-review', 
  * produces: a dead-scan tag and *no* user content (note / link override / added
  * badges). A tag the user typed a note or link onto is therefore never touched.
  */
-function isAutoClearableTag(a: { tag?: string; auto?: boolean; note?: string; gameUrl?: string; badgeUrl?: string; addedBadges?: unknown[] }): boolean {
+function isAutoClearableTag(a: { tag?: string; auto?: boolean; note?: string; gameUrl?: string; badgeUrl?: string; addedBadges?: unknown[]; savedBadges?: unknown[] }): boolean {
   if (!a.tag) return false;
   if (a.auto) return true;
-  return DEAD_SCAN_TAGS.has(a.tag) && !a.note && !a.gameUrl && !a.badgeUrl && !a.addedBadges?.length;
+  return DEAD_SCAN_TAGS.has(a.tag) && !a.note && !a.gameUrl && !a.badgeUrl && !a.addedBadges?.length && !a.savedBadges?.length;
 }
 
 /**
@@ -409,8 +454,9 @@ function hasContent(a: {
   gameUrl?: string;
   badgeUrl?: string;
   addedBadges?: unknown[];
+  savedBadges?: unknown[];
 }): boolean {
-  return !!(a.tag || a.note || a.gameUrl || a.badgeUrl || a.addedBadges?.length);
+  return !!(a.tag || a.note || a.gameUrl || a.badgeUrl || a.addedBadges?.length || a.savedBadges?.length);
 }
 
 function makeId(): string {

@@ -399,6 +399,7 @@ export async function setBadgerProgressMany(progress: Record<string, GameProgres
 
 // ── Known-owned baseline (for "what did I unlock this update" diffing) ───────
 const KNOWN_OWNED_KEY = 'bloxplus.badgerhub.knownOwned';
+const KNOWN_OWNED_FULL_SCAN_KEY = 'bloxplus.badgerhub.knownOwnedFullScanAt';
 
 /** Returns the persisted set of owned badge ids, or `null` if no baseline yet. */
 export async function getKnownOwned(): Promise<Set<number> | null> {
@@ -410,6 +411,50 @@ export async function getKnownOwned(): Promise<Set<number> | null> {
 
 export async function setKnownOwned(ids: Iterable<number>): Promise<void> {
   await chrome.storage.local.set({ [KNOWN_OWNED_KEY]: [...new Set(ids)] });
+}
+
+let knownOwnedWrite = Promise.resolve();
+
+export async function addKnownOwned(ids: Iterable<number>): Promise<Set<number>> {
+  const incoming = [...new Set(ids)].filter((id): id is number => typeof id === 'number');
+  if (!incoming.length) return (await getKnownOwned()) ?? new Set<number>();
+  const write = knownOwnedWrite.then(async () => {
+    const merged = new Set<number>((await getKnownOwned()) ?? []);
+    for (const id of incoming) merged.add(id);
+    await chrome.storage.local.set({ [KNOWN_OWNED_KEY]: [...merged] });
+    return merged;
+  });
+  knownOwnedWrite = write.then(
+    () => undefined,
+    () => undefined
+  );
+  return write;
+}
+
+export async function removeKnownOwned(ids: Iterable<number>): Promise<Set<number>> {
+  const outgoing = [...new Set(ids)].filter((id): id is number => typeof id === 'number');
+  if (!outgoing.length) return (await getKnownOwned()) ?? new Set<number>();
+  const write = knownOwnedWrite.then(async () => {
+    const merged = new Set<number>((await getKnownOwned()) ?? []);
+    for (const id of outgoing) merged.delete(id);
+    await chrome.storage.local.set({ [KNOWN_OWNED_KEY]: [...merged] });
+    return merged;
+  });
+  knownOwnedWrite = write.then(
+    () => undefined,
+    () => undefined
+  );
+  return write;
+}
+
+export async function getKnownOwnedFullScanAt(): Promise<number | null> {
+  const r = await chrome.storage.local.get(KNOWN_OWNED_FULL_SCAN_KEY);
+  const v = r[KNOWN_OWNED_FULL_SCAN_KEY];
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+export async function setKnownOwnedFullScanAt(ts = Date.now()): Promise<void> {
+  await chrome.storage.local.set({ [KNOWN_OWNED_FULL_SCAN_KEY]: ts });
 }
 
 // ── Per-game badge lists (lazy; in-memory + persistence) ────────────────────

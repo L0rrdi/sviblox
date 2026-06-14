@@ -26,7 +26,10 @@ import {
   setBadgerProgress,
   setBadgerProgressMany,
   getKnownOwned,
-  setKnownOwned,
+  addKnownOwned,
+  removeKnownOwned,
+  getKnownOwnedFullScanAt,
+  setKnownOwnedFullScanAt,
   BadgerGame,
   BadgerBadge,
   GameProgress,
@@ -57,6 +60,8 @@ import {
   addBadgerListBadges,
   updateBadgerListBadge,
   removeBadgerListBadge,
+  saveBadgerListSavedBadge,
+  removeBadgerListSavedBadge,
   tagBadgerBadges,
   tagBadgerGames,
   clearAutoBadgerBadgeTags,
@@ -67,6 +72,7 @@ import {
   BADGER_ANNOTATION_LIMITS,
   BadgerAnnotations,
   AddedBadge,
+  SavedBadge,
 } from '@/storage/badgerAnnotations';
 import { getSettings, setSettings, onSettingsChanged } from '@/storage/settingsStore';
 import { Settings } from '@/types';
@@ -77,7 +83,8 @@ const STYLE_ID = 'bloxplus-badgerhub-page-style';
 const HIDE_ATTR = 'data-bp-badgerhub-hidden';
 const HIDE_PRIOR_DISPLAY_ATTR = 'data-bp-badgerhub-prior-display';
 const UPDATE_ALL_GAME_CONCURRENCY = 4;
-const UPDATE_ALL_USER_BADGE_MAX_PAGES = 200;
+const UPDATE_ALL_RECENT_BADGE_PAGES = 30;
+const UPDATE_ALL_FIRST_SWEEP_PAGES = 100;
 const RECOMMENDED_DETAIL_FETCH_LIMIT = 120;
 const RECOMMENDED_RENDER_LIMIT = 80;
 const SEARCH_DEBOUNCE_MS = 100;
@@ -697,6 +704,93 @@ function renderSkeleton(page: HTMLElement): void {
       void removeBadgerListBadge(listKey, addedId).then(() => refreshListRow(listKey));
     }
   });
+  page.addEventListener('change', (e) => {
+    const target = e.target;
+    if (!(target instanceof HTMLInputElement) || !target.matches('[data-bp-save-badge]')) return;
+    void handleSavedBadgeToggle(target);
+  });
+}
+
+async function handleSavedBadgeToggle(input: HTMLInputElement): Promise<void> {
+  const listKey = input.dataset.listKey ?? '';
+  if (!listKey) return;
+  const addedId = input.dataset.addedId ?? '';
+  const badgeId = Number(input.dataset.badgeId);
+  input.disabled = true;
+  try {
+    if (addedId) {
+      if (input.checked && Number.isFinite(badgeId)) {
+        await addKnownOwned([badgeId]);
+        markBadgeRowOwned(input);
+      } else if (!input.checked) {
+        if (Number.isFinite(badgeId)) await removeKnownOwned([badgeId]);
+        markBadgeRowUnowned(input);
+        await removeBadgerListBadge(listKey, addedId);
+      }
+    } else {
+      if (!Number.isFinite(badgeId)) return;
+      if (input.checked) {
+        await saveBadgerListSavedBadge(listKey, {
+          badgeId,
+          game: input.dataset.gameName,
+          badge: input.dataset.badgeName || `Badge ${badgeId}`,
+          badgeUrl: input.dataset.badgeUrl,
+        });
+        await addKnownOwned([badgeId]);
+        markBadgeRowOwned(input);
+      } else {
+        await removeBadgerListSavedBadge(listKey, badgeId);
+        await removeKnownOwned([badgeId]);
+        markBadgeRowUnowned(input);
+      }
+    }
+    if (addedId) refreshListRow(listKey);
+  } finally {
+    input.disabled = false;
+  }
+}
+
+function markBadgeRowOwned(input: HTMLInputElement): void {
+  const li = input.closest<HTMLElement>('.bp-bh-badge');
+  if (!li) return;
+  li.dataset.owned = '1';
+  const owned = li.querySelector<HTMLElement>('.bp-bh-owned');
+  if (owned) {
+    owned.textContent = '✓ owned';
+    owned.removeAttribute('hidden');
+  }
+  const det = li.closest<HTMLDetailsElement>('details.bp-bh-game');
+  if (det) {
+    refreshBadgeCount(det);
+    updateProgressFromOpenList(det);
+  }
+  const page = document.getElementById(PAGE_ID);
+  if (page instanceof HTMLElement) {
+    updateOverview(page);
+    invalidateRecommendedCache();
+    const recommendedPanel = page.querySelector<HTMLElement>('[data-bh-recommended]');
+    if (recommendedPanel && !recommendedPanel.hidden) void renderRecommendedPanel(page);
+  }
+}
+
+function markBadgeRowUnowned(input: HTMLInputElement): void {
+  const li = input.closest<HTMLElement>('.bp-bh-badge');
+  if (!li) return;
+  li.removeAttribute('data-owned');
+  li.removeAttribute('data-player-owned');
+  li.querySelector('.bp-bh-owned')?.setAttribute('hidden', '');
+  const det = li.closest<HTMLDetailsElement>('details.bp-bh-game');
+  if (det) {
+    refreshBadgeCount(det);
+    updateProgressFromOpenList(det);
+  }
+  const page = document.getElementById(PAGE_ID);
+  if (page instanceof HTMLElement) {
+    updateOverview(page);
+    invalidateRecommendedCache();
+    const recommendedPanel = page.querySelector<HTMLElement>('[data-bh-recommended]');
+    if (recommendedPanel && !recommendedPanel.hidden) void renderRecommendedPanel(page);
+  }
 }
 
 async function updateAllBadgerPages(page: HTMLElement, btn: HTMLButtonElement): Promise<void> {
@@ -724,25 +818,79 @@ async function updateAllBadgerPages(page: HTMLElement, btn: HTMLButtonElement): 
     if (runId !== updateAllId || loadId !== state.loadId || !page.isConnected) return;
     await persistGameBadges();
 
-    setMeta(page, 'Scanning your Roblox badge pages...');
-    const userBadges = await getAllUserBadges(userId, UPDATE_ALL_USER_BADGE_MAX_PAGES, {
-      forceRefresh: true,
-      onPage: (pageNo, totalLoaded) => {
-        if (runId !== updateAllId || loadId !== state.loadId) return;
-        btn.textContent = `Scanning ${pageNo}`;
-        setMeta(page, `Scanned ${totalLoaded} Roblox badge${totalLoaded === 1 ? '' : 's'}...`);
-      },
-    });
+    const previousKnown = await getKnownOwned();
+    const fullScanAt = await getKnownOwnedFullScanAt();
+    const baselineEstablished = Boolean(fullScanAt) || previousKnown !== null;
+    let userOwnedIds: Set<number>;
+    let scanLabel: string;
+    let scanComplete = true;
+    let shouldMarkFullScan = false;
+
+    if (baselineEstablished) {
+      setMeta(page, `Scanning your latest ${UPDATE_ALL_RECENT_BADGE_PAGES * 100} Roblox badge${UPDATE_ALL_RECENT_BADGE_PAGES * 100 === 1 ? '' : 's'}...`);
+      const recentBadges = await getAllUserBadges(userId, UPDATE_ALL_RECENT_BADGE_PAGES, {
+        forceRefresh: true,
+        onPage: (pageNo, totalLoaded) => {
+          if (runId !== updateAllId || loadId !== state.loadId) return;
+          btn.textContent = `Recent ${pageNo}/${UPDATE_ALL_RECENT_BADGE_PAGES}`;
+          setMeta(page, `Scanned ${totalLoaded.toLocaleString()} recent Roblox badge${totalLoaded === 1 ? '' : 's'}...`);
+        },
+      });
+      userOwnedIds = new Set(recentBadges.map((badge) => badge.id));
+      scanLabel = `${recentBadges.length.toLocaleString()} recent Roblox badge${recentBadges.length === 1 ? '' : 's'}`;
+      shouldMarkFullScan = !fullScanAt;
+    } else {
+      const allIds = collectAllPlayerBadgeIds(loaded);
+      const abort = () => runId !== updateAllId || loadId !== state.loadId || !page.isConnected;
+      setMeta(page, `Sweeping your latest ${(UPDATE_ALL_FIRST_SWEEP_PAGES * 100).toLocaleString()} Roblox badge${UPDATE_ALL_FIRST_SWEEP_PAGES * 100 === 1 ? '' : 's'}...`);
+      const sweep = await sweepPlayerBadgeIds(
+        userId,
+        (scanned, ids) => {
+          if (abort()) return;
+          btn.textContent = `Sweep ${Math.ceil(scanned / 100)}/${UPDATE_ALL_FIRST_SWEEP_PAGES}`;
+          setMeta(page, `Swept ${scanned.toLocaleString()} Roblox badge${scanned === 1 ? '' : 's'} (${ids.size.toLocaleString()} unique found)...`);
+        },
+        abort,
+        { pageBudget: UPDATE_ALL_FIRST_SWEEP_PAGES, forceRefresh: true }
+      );
+      if (abort()) return;
+      if (sweep.complete) {
+        userOwnedIds = sweep.ids;
+        scanLabel = `${sweep.ids.size.toLocaleString()} swept Roblox badge${sweep.ids.size === 1 ? '' : 's'}`;
+        shouldMarkFullScan = true;
+      } else {
+        setMeta(page, `Verifying ${allIds.length.toLocaleString()} Badger Hub badge${allIds.length === 1 ? '' : 's'} after 10k sweep...`);
+        const verify = await verifyAllPlayerBadges(
+          userId,
+          allIds,
+          (checked, ownedIds) => {
+            if (runId !== updateAllId || loadId !== state.loadId) return;
+            btn.textContent = `${checked.toLocaleString()}/${allIds.length.toLocaleString()}`;
+            setMeta(
+              page,
+              `Verified ${checked.toLocaleString()} / ${allIds.length.toLocaleString()} Badger Hub badge${allIds.length === 1 ? '' : 's'} (${ownedIds.size.toLocaleString()} owned found, seeded by sweep)...`
+            );
+          },
+          abort,
+          sweep.ids,
+          { forceRefresh: true }
+        );
+        userOwnedIds = verify.ownedIds;
+        scanComplete = verify.complete;
+        scanLabel = `${sweep.ids.size.toLocaleString()} swept Roblox badge${sweep.ids.size === 1 ? '' : 's'} + ${allIds.length.toLocaleString()} direct badge check${allIds.length === 1 ? '' : 's'}`;
+        shouldMarkFullScan = verify.complete;
+      }
+    }
     if (runId !== updateAllId || loadId !== state.loadId || !page.isConnected) return;
 
-    const userOwnedIds = new Set(userBadges.map((badge) => badge.id));
     const ownedBadgerBadges = collectOwnedBadgerBadges(loaded, userOwnedIds);
     const ownedBadgerIds = new Set(
       ownedBadgerBadges
         .map((entry) => entry.badge.badgeId)
         .filter((id): id is number => typeof id === 'number')
     );
-    const previousKnown = await getKnownOwned();
+    const mergedOwnedIds = await addKnownOwned(ownedBadgerIds);
+    if (shouldMarkFullScan) await setKnownOwnedFullScanAt();
     const unlocked = previousKnown
       ? ownedBadgerBadges.filter((entry) => {
           const id = entry.badge.badgeId;
@@ -750,9 +898,8 @@ async function updateAllBadgerPages(page: HTMLElement, btn: HTMLButtonElement): 
         })
       : [];
 
-    await applyAllProgress(page, loaded, userOwnedIds);
+    await applyAllProgress(page, loaded, mergedOwnedIds);
     updateOverview(page);
-    await setKnownOwned(ownedBadgerIds);
 
     // Ownership + owner counts changed — drop the cached panel so it rebuilds.
     invalidateRecommendedCache();
@@ -767,7 +914,7 @@ async function updateAllBadgerPages(page: HTMLElement, btn: HTMLButtonElement): 
     );
     setMeta(
       page,
-      `Updated ${loaded.length} Badger Hub page${loaded.length === 1 ? '' : 's'} using ${userBadges.length} Roblox badge${userBadges.length === 1 ? '' : 's'}.`
+      `Updated ${loaded.length} Badger Hub page${loaded.length === 1 ? '' : 's'} using ${scanLabel}${scanComplete ? '' : ' (some checks will retry next scan)'}.`
     );
   } catch (err) {
     if (runId === updateAllId && loadId === state.loadId && page.isConnected) {
@@ -1014,9 +1161,7 @@ async function quickScanRecommended(page: HTMLElement, btn: HTMLButtonElement): 
 
     // Fold the freshly verified owned ids into the known-owned baseline so the
     // recommended filter keeps hiding them and per-game progress can grow.
-    const knownOwned = new Set<number>((await getKnownOwned()) ?? []);
-    for (const id of ownedShownSet) knownOwned.add(id);
-    await setKnownOwned(knownOwned);
+    const knownOwned = await addKnownOwned(ownedShownSet);
     if (stale()) return;
     // Newly-owned badges should drop out — rebuild the panel on next open.
     invalidateRecommendedCache();
@@ -1643,6 +1788,10 @@ function applyOwnedRows(
     li.removeAttribute('data-owned');
     li.removeAttribute('data-player-owned');
     li.querySelector('.bp-bh-owned')?.setAttribute('hidden', '');
+    if (!opts.player) {
+      const cb = li.querySelector<HTMLInputElement>('[data-bp-save-badge]');
+      if (cb && !cb.dataset.savedBadge && !cb.dataset.addedId) cb.checked = false;
+    }
   }
   for (const badge of badges) {
     const id = badge.badgeId;
@@ -1655,6 +1804,10 @@ function applyOwnedRows(
       if (owned) {
         owned.textContent = opts.label ?? '✓ owned';
         owned.removeAttribute('hidden');
+      }
+      if (!opts.player) {
+        const cb = li.querySelector<HTMLInputElement>('[data-bp-save-badge]');
+        if (cb) cb.checked = true;
       }
     }
   }
@@ -2044,17 +2197,19 @@ function collectAllPlayerBadgeIds(loaded: LoadedBadgerGame[]): number[] {
 async function sweepPlayerBadgeIds(
   userId: number,
   onProgress?: (scanned: number, ids: Set<number>) => void,
-  shouldAbort?: () => boolean
+  shouldAbort?: () => boolean,
+  opts: { pageBudget?: number; forceRefresh?: boolean } = {}
 ): Promise<{ ids: Set<number>; complete: boolean }> {
   const ids = new Set<number>();
   let cursor = '';
   let nextReportAt = PLAYER_VERIFY_PROGRESS_STEP;
-  for (let pageNum = 0; pageNum < PLAYER_SWEEP_PAGE_BUDGET; pageNum += 1) {
+  const pageBudget = opts.pageBudget ?? PLAYER_SWEEP_PAGE_BUDGET;
+  for (let pageNum = 0; pageNum < pageBudget; pageNum += 1) {
     if (shouldAbort?.()) return { ids, complete: false };
     let res: Awaited<ReturnType<typeof getUserBadgesPage>> | null = null;
     for (let attempt = 0; attempt <= PLAYER_SWEEP_PAGE_RETRIES; attempt += 1) {
       try {
-        res = await getUserBadgesPage(userId, cursor, 100);
+        res = await getUserBadgesPage(userId, cursor, 100, { forceRefresh: opts.forceRefresh });
         break;
       } catch {
         if (attempt === PLAYER_SWEEP_PAGE_RETRIES) return { ids, complete: false };
@@ -2090,7 +2245,8 @@ async function verifyAllPlayerBadges(
   allIds: number[],
   onProgress?: (checked: number, ownedIds: Set<number>) => void,
   shouldAbort?: () => boolean,
-  seedOwned?: Set<number>
+  seedOwned?: Set<number>,
+  opts: { forceRefresh?: boolean } = {}
 ): Promise<{ ownedIds: Set<number>; complete: boolean }> {
   const ownedIds = new Set<number>(seedOwned);
   // Skip ids the sweep already confirmed owned — they don't need an API call.
@@ -2111,7 +2267,7 @@ async function verifyAllPlayerBadges(
       // abort the whole pass, so a few throttled batches can't tank the result.
       for (let attempt = 0; attempt <= PLAYER_VERIFY_BATCH_RETRIES; attempt += 1) {
         try {
-          const owned = await getUserBadgeAwardedDates(userId, batch);
+          const owned = await getUserBadgeAwardedDates(userId, batch, { forceRefresh: opts.forceRefresh });
           for (const id of owned.keys()) ownedIds.add(id);
           break;
         } catch {
@@ -2512,7 +2668,13 @@ function renderEditButton(kind: 'game' | 'badge', annoKey: string, name: string)
   return `<button type="button" class="bp-bh-edit-btn" ${attr} data-anno-key="${escapeAttr(annoKey)}" data-anno-name="${escapeAttr(name)}" title="Edit ${kind}" aria-label="Edit ${kind}">✎</button>`;
 }
 
-type AnnoLike = { tag?: string; note?: string } | null | undefined;
+type AnnoLike = {
+  tag?: string;
+  note?: string;
+  gameUrl?: string;
+  badgeUrl?: string;
+  addedBadges?: unknown[];
+} | null | undefined;
 
 function renderAnnoTag(anno: AnnoLike): string {
   const info = annoTagInfo(anno);
@@ -2534,6 +2696,7 @@ function annoTagInfo(anno: AnnoLike): { label: string; cls: string; title: strin
       title: [badgerTagLabel(anno.tag), anno.note].filter(Boolean).join(' — '),
     };
   }
+  if (!anno.note && !anno.gameUrl && !anno.badgeUrl && !anno.addedBadges?.length) return null;
   return { label: 'Edited', cls: ' bp-bh-anno-edited', title: ['Edited', anno.note].filter(Boolean).join(' — ') };
 }
 
@@ -2581,6 +2744,34 @@ function addedBadgesForList(listKey: string): { entries: AddedBadge[]; badges: B
   return { entries, badges: entries.map(toSyntheticBadge) };
 }
 
+function savedBadgeForList(listKey: string, badgeId: number): SavedBadge | null {
+  return getBadgerGameAnnotation(listKey)?.savedBadges?.find((b) => b.badgeId === badgeId) ?? null;
+}
+
+function renderAddedBadgeSaveCheckbox(a: AddedBadge, listKey: string, badgeId: number | null): string {
+  if (!badgeId) return '';
+  const checked = true;
+  return `
+    <label class="bp-bh-save-toggle" title="Uncheck to delete this saved badge">
+      <input type="checkbox"${checked ? ' checked' : ''} data-bp-save-badge data-list-key="${escapeAttr(listKey)}" data-added-id="${escapeAttr(a.id)}" data-badge-id="${badgeId}" />
+      <span aria-hidden="true"></span>
+    </label>`;
+}
+
+function renderSourceBadgeSaveCheckbox(b: BadgerBadge, listKey: string, knownOwned?: Set<number> | null): string {
+  const badgeId = b.badgeId;
+  if (!listKey || !badgeId) return '';
+  const saved = savedBadgeForList(listKey, badgeId);
+  const checked = Boolean(saved || knownOwned?.has(badgeId));
+  const gameName = b.resolvedGameName || b.game || '';
+  const badgeUrl = `https://www.roblox.com/badges/${badgeId}`;
+  return `
+    <label class="bp-bh-save-toggle" title="${checked ? 'Owned / saved' : 'Check to mark owned'}">
+      <input type="checkbox"${checked ? ' checked' : ''}${saved ? ' data-saved-badge="1"' : ''} data-bp-save-badge data-list-key="${escapeAttr(listKey)}" data-badge-id="${badgeId}" data-game-name="${escapeAttr(gameName)}" data-badge-name="${escapeAttr(b.badge || `Badge ${badgeId}`)}" data-badge-url="${escapeAttr(badgeUrl)}" />
+      <span aria-hidden="true"></span>
+    </label>`;
+}
+
 /**
  * Renders an opened list's badge rows from the cached sheet list + the user's
  * added badges. Reused by `openGame` and after add/remove so the open list stays
@@ -2599,6 +2790,7 @@ async function renderListBadges(det: HTMLDetailsElement): Promise<void> {
     : [];
   if (!det.isConnected) return;
   const { entries: addedEntries, badges: addedBadges } = addedBadgesForList(listKey);
+  const knownOwned = state.playerInspection ? null : await getKnownOwned().catch(() => null);
   const all = [...addedBadges, ...sheetBadges];
   if (!all.length) {
     host.innerHTML = `<div class="bp-bh-empty">No badges in this list yet.</div>`;
@@ -2609,7 +2801,7 @@ async function renderListBadges(det: HTMLDetailsElement): Promise<void> {
     `<div class="bp-bh-badge-count" data-badge-count>${all.length} badge${all.length === 1 ? '' : 's'}</div>` +
     '<ul class="bp-bh-badge-list">' +
     addedEntries.map((a) => renderAddedBadgeRow(a, listKey)).join('') +
-    sheetBadges.map((b) => renderBadgeRow(b, gamePrefix)).join('') +
+    sheetBadges.map((b) => renderBadgeRow(b, gamePrefix, listKey, knownOwned)).join('') +
     '</ul>';
   host.dataset.loaded = '1';
   applyBadgeGameHighlights(det);
@@ -2622,6 +2814,7 @@ async function renderListBadges(det: HTMLDetailsElement): Promise<void> {
     });
     void hydrateInspectedListOwnership(det, all, inspected);
   } else {
+    if (knownOwned?.size) applyOwnedRows(det, all, knownOwned, countOwnedBadges(all, knownOwned));
     void hydrateOwnership(det, all);
   }
   void hydrateGameLinks(det, all);
@@ -2750,7 +2943,8 @@ function renderAddedBadgeRow(a: AddedBadge, listKey: string): string {
   const remove = `<button type="button" class="bp-bh-edit-btn bp-bh-remove-added" data-bp-remove-added data-list-key="${escapeAttr(listKey)}" data-added-id="${escapeAttr(a.id)}" title="Remove added badge" aria-label="Remove added badge">✕</button>`;
   const owned = `<span class="bp-bh-owned" hidden title="You own this badge">✓ owned</span>`;
   const search = ` data-game-search="${escapeAttr([a.game, a.badge].filter(Boolean).join(' ').toLowerCase())}"`;
-  return `<li class="bp-bh-badge bp-bh-badge-added"${idAttr}${search} data-added-id="${escapeAttr(a.id)}">${gameHtml}<span class="bp-bh-badge-main">${badgeHtml}${desc}</span>${tag}${owned}${edit}${remove}</li>`;
+  const save = renderAddedBadgeSaveCheckbox(a, listKey, badgeId);
+  return `<li class="bp-bh-badge bp-bh-badge-added"${idAttr}${search} data-added-id="${escapeAttr(a.id)}">${save}${gameHtml}<span class="bp-bh-badge-main">${badgeHtml}${desc}</span>${tag}${owned}${edit}${remove}</li>`;
 }
 
 let cachedUserId: number | null | undefined;
@@ -2766,12 +2960,25 @@ async function hydrateOwnership(det: HTMLDetailsElement, badges: BadgerBadge[]):
   if (!ids.length) return;
   const userId = await getCachedUserId();
   if (!userId || !det.isConnected) return;
-  const owned = await getUserBadgeAwardedDates(userId, ids).catch(() => new Map<number, string | null>());
+  const [owned, knownOwned] = await Promise.all([
+    getUserBadgeAwardedDates(userId, ids).catch(() => new Map<number, string | null>()),
+    getKnownOwned().catch(() => null),
+  ]);
   if (!det.isConnected) return;
   const ownedIds = new Set<number>(owned.keys());
+  for (const id of knownOwned ?? []) ownedIds.add(id);
   const ownedCount = countOwnedBadges(badges, ownedIds);
   const checkableTotal = checkableBadgeCount(badges);
   applyOwnedRows(det, badges, ownedIds, ownedCount);
+  if (ownedIds.size) {
+    void addKnownOwned(ownedIds).then(() => {
+      const page = document.getElementById(PAGE_ID);
+      if (!(page instanceof HTMLElement) || !det.isConnected) return;
+      invalidateRecommendedCache();
+      const recommendedPanel = page.querySelector<HTMLElement>('[data-bh-recommended]');
+      if (recommendedPanel && !recommendedPanel.hidden) void renderRecommendedPanel(page);
+    });
+  }
   // Persist + show the n/total on the hub row (survives across sessions).
   const sheetId = det.dataset.sheetId;
   if (sheetId) {
@@ -2938,7 +3145,7 @@ function hasBadgeName(b: BadgerBadge): boolean {
   return !!b.badge?.trim();
 }
 
-function renderBadgeRow(b: BadgerBadge, gamePrefix?: string): string {
+function renderBadgeRow(b: BadgerBadge, gamePrefix?: string, listKey = '', knownOwned?: Set<number> | null): string {
   const idAttr = b.badgeId ? ` data-badge-id="${b.badgeId}"` : '';
   const searchAttr = ` data-game-search="${escapeAttr(badgeGameSearchText(b))}"`;
   const annoKey = gamePrefix ? `${gamePrefix}#${b.order}` : '';
@@ -2963,7 +3170,8 @@ function renderBadgeRow(b: BadgerBadge, gamePrefix?: string): string {
   const tagHtml = renderAnnoTag(anno);
   const editBtn = renderEditButton('badge', annoKey, b.badge);
   const owned = `<span class="bp-bh-owned" hidden title="You own this badge">✓ owned</span>`;
-  return `<li class="bp-bh-badge"${idAttr}${searchAttr}${annoKeyAttr}>${gameHtml}<span class="bp-bh-badge-main">${badgeHtml}${descHtml}</span>${tagHtml}${owned}${editBtn}</li>`;
+  const save = renderSourceBadgeSaveCheckbox(b, listKey, knownOwned);
+  return `<li class="bp-bh-badge"${idAttr}${searchAttr}${annoKeyAttr}>${save}${gameHtml}<span class="bp-bh-badge-main">${badgeHtml}${descHtml}</span>${tagHtml}${owned}${editBtn}</li>`;
 }
 
 function badgeGameSearchText(badge: BadgerBadge): string {
@@ -3263,7 +3471,11 @@ function applyGameAnnotationDom(row: HTMLElement): void {
   if (!key) return;
   const anno = getBadgerGameAnnotation(key);
   const nameSlot = row.querySelector<HTMLAnchorElement>('a.bp-bh-game-name[data-game-name-slot]');
-  if (nameSlot) setSlotHref(nameSlot, anno?.gameUrl);
+  if (nameSlot) {
+    const game = state.games.find((g) => gameAnnoKey(g) === key);
+    const naturalUrl = game?.placeId ? `https://www.roblox.com/games/${game.placeId}` : undefined;
+    setSlotHref(nameSlot, anno?.gameUrl || naturalUrl);
+  }
   const tagEl =
     row.querySelector<HTMLElement>(':scope > summary [data-anno-tag]') ??
     row.querySelector<HTMLElement>(':scope > [data-anno-tag]');
@@ -3718,6 +3930,19 @@ function refreshBadgeCount(det: HTMLDetailsElement): void {
   }
 }
 
+function updateProgressFromOpenList(det: HTMLDetailsElement): void {
+  if (state.playerInspection) return;
+  const sheetId = det.dataset.sheetId;
+  if (!sheetId) return;
+  const total = det.querySelectorAll('.bp-bh-badge').length;
+  const owned = det.querySelectorAll('.bp-bh-badge[data-owned="1"]').length;
+  const checkableTotal = det.querySelectorAll('.bp-bh-badge[data-badge-id]').length;
+  const progressKey = badgerProgressKey(sheetId, det.dataset.gid || null);
+  state.progress[progressKey] = { owned, total, checkableTotal };
+  void setBadgerProgress(progressKey, owned, total, checkableTotal);
+  updateProgressSlot(det, owned, total, checkableTotal);
+}
+
 /** Restores a hub game row's displayed name to its curated badger label. */
 function restoreGameRowName(page: HTMLElement, key: string): void {
   const game = state.games.find((g) => gameAnnoKey(g) === key);
@@ -4138,6 +4363,9 @@ async function buildAnnotationsExport(): Promise<AnnotationExport> {
     gameUrl: anno.gameUrl ?? null,
     addedBadges: anno.addedBadges?.length
       ? anno.addedBadges.map((b) => ({ game: b.game, badge: b.badge, badgeUrl: b.badgeUrl ?? null }))
+      : null,
+    savedBadges: anno.savedBadges?.length
+      ? anno.savedBadges.map((b) => ({ badgeId: b.badgeId, game: b.game ?? null, badge: b.badge, badgeUrl: b.badgeUrl ?? null }))
       : null,
   }));
   const badges: Array<Record<string, unknown>> = [];
@@ -4673,6 +4901,16 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-bh-edit-btn:hover { background: rgba(138,180,255,0.3); }
     #${PAGE_ID}.bp-bh-edit-mode .bp-bh-edit-btn { display: inline-flex; }
     #${PAGE_ID} .bp-bh-badge .bp-bh-edit-btn { width: 22px; height: 22px; font-size: 12px; }
+    #${PAGE_ID} .bp-bh-save-toggle {
+      display: none; flex: 0 0 auto; width: 22px; height: 22px;
+      align-items: center; justify-content: center; cursor: pointer;
+    }
+    #${PAGE_ID}.bp-bh-edit-mode .bp-bh-save-toggle { display: inline-flex; }
+    #${PAGE_ID} .bp-bh-save-toggle input {
+      width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: #3fc679;
+    }
+    #${PAGE_ID} .bp-bh-save-toggle input:disabled { cursor: wait; opacity: 0.65; }
+    #${PAGE_ID} .bp-bh-save-toggle span { display: none; }
     /* Rate-limit countdown popup (mounted on <body>, so unscoped). */
     #bloxplus-bh-ratelimit {
       position: fixed; right: 18px; bottom: 18px; z-index: 2147483600;
