@@ -1,4 +1,5 @@
 import { cacheGet, cacheSet } from '@/storage/cacheStore';
+import { notifyRateLimited } from './rateLimitNotifier';
 
 interface FetchOptions {
   cacheKey?: string;
@@ -39,7 +40,9 @@ export async function robloxFetch<T>(url: string, opts: FetchOptions = {}): Prom
         if (res.status === 429 || res.status >= 500) {
           lastErr = new RobloxHttpError(res.status, url);
           if (attempt < retries - 1) {
-            await sleep(2 ** attempt * 500 + Math.random() * 250);
+            const delay = 2 ** attempt * 500 + Math.random() * 250;
+            if (res.status === 429) notifyRateLimited(delay);
+            await sleep(delay);
           }
           continue;
         }
@@ -93,7 +96,9 @@ export async function robloxPost<T>(
         if (res.status === 429 || res.status >= 500) {
           lastErr = new RobloxHttpError(res.status, url);
           if (attempt < retries - 1) {
-            await sleep(2 ** attempt * 500 + Math.random() * 250);
+            const delay = 2 ** attempt * 500 + Math.random() * 250;
+            if (res.status === 429) notifyRateLimited(delay);
+            await sleep(delay);
           }
           continue;
         }

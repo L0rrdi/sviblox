@@ -1,26 +1,30 @@
 /**
- * Badger Hub: Legacy — a community list of "legacy badger" games. The hub
- * sheet ("ANDREW PERSONAL TAKES ON BADGERS") lists games; each game's col-C
- * cell links to that game's own badge sheet (a UHBL-style per-game badge list).
+ * Badger Hub — a community list of "badger" games ("badge list of badge
+ * challenges/badgers"). The source is a single Google spreadsheet with ~190
+ * tabs: a "table of contents" tab listing every badger, plus one tab per badger
+ * holding its badge list.
  *
- * Unlike the UHBL sheet:
- *   - CSV export is blocked (401) for the hub, so we read the **gviz** endpoint
- *     (`/gviz/tq?tqx=out:json`), which is public and returns values for every
- *     row. Both the hub and the per-game sub-sheets are fetched this way
- *     through the SW `fetchUrl` proxy (already allowlisted for
- *     `docs.google.com/spreadsheets/*`).
- *   - The hub itself has no Roblox badge links, but the per-game badge-name
- *     cells usually do. gviz strips those links, so we recover badge IDs from
- *     the sub-sheet edit HTML and then enrich/ownership-check from Roblox.
+ * The hub list's per-row **background color** is the authoritative signal:
+ *   - green  → legacy badger
+ *   - yellow → normal badger
+ *   - none / grey / white → skipped
+ * No plain Google endpoint (gviz / htmlview / pubhtml) exposes cell fills, so we
+ * read the **XLSX export** (`export?format=xlsx`) — it carries every cell's fill
+ * in `styles.xml`. The service worker fetches the workbook as binary and
+ * `badgerHubXlsx.ts` unzips + parses it (Chrome `DecompressionStream`, no lib).
  *
- * The hub list is cached in `chrome.storage.local` (SWR). Per-game badge lists
- * are loaded lazily when a game's dropdown is opened, cached in memory, and
- * persisted under `bloxplus.badgerhub.gamebadges` so the UI survives source
- * sheet loss and can power search/recommendations without re-fetching.
+ * One workbook parse yields everything: the hub list (with color classification
+ * + a WIP flag from col F) AND every badger tab's full badge list with **exact**
+ * Roblox badge ids (each tab's col D is a real `roblox.com/badges/{id}` link, so
+ * row→id is 1:1 — no slug/sandwich matching). Game/badge names + descriptions
+ * are then resolved from Roblox. The hub list is cached in `chrome.storage.local`
+ * (SWR); badge lists are persisted under `bloxplus.badgerhub.gamebadges`.
  */
 
-const HUB_SHEET_ID = '1rgH-Dc1VBw0rUbjvRGreNwYVQncCtZttbLHpRhhNoec';
-const HUB_GID = '6195697';
+import type { ParsedBadgerHub } from './badgerHubXlsx';
+
+const HUB_SHEET_ID = '1vYfW9LFNWIsrShoQcVxvW67Xf66fpGnOnm-U_41l0r8';
+const HUB_GID = '1567518442';
 const STORAGE_KEY = 'bloxplus.badgerhub.hub';
 const PROGRESS_KEY = 'bloxplus.badgerhub.progress';
 const FRESH_MS = 6 * 60 * 60_000;
@@ -28,44 +32,32 @@ const FRESH_MS = 6 * 60 * 60_000;
 export interface GameProgress {
   owned: number;
   total: number;
-}
-
-/**
- * Curator-provided sheet-row ranges of the "legacy badger" games (green cells
- * in the source). The green marking isn't fetchable, so the rows are listed
- * here instead. 1-based, inclusive, matching the hub sheet's actual row numbers
- * (header on row 1, games start at row 4). Update this if the curator reshuffles.
- */
-const LEGACY_ROW_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [4, 34],
-  [55, 92],
-  [94, 98],
-  [104, 104],
-  [107, 136],
-  [138, 151],
-  [153, 159],
-];
-
-function isLegacyRow(sheetRow: number): boolean {
-  return LEGACY_ROW_RANGES.some(([a, b]) => sheetRow >= a && sheetRow <= b);
+  /** Rows with a Roblox badge id. Completion can only be verified against these. */
+  checkableTotal?: number;
 }
 
 export interface BadgerGame {
-  /** 1-based order among the rendered (legacy) games. */
+  /** 1-based order among the rendered (legacy + normal) badgers. */
   order: number;
-  /** The game's actual row number in the hub sheet. */
+  /** The badger's row number in the table-of-contents tab. */
   sheetRow: number;
-  /** True when this row is in a curator "legacy" range. */
+  /** True when the row's fill color is green (legacy badger). */
   legacy: boolean;
-  /** Game / badger name (hub col B). */
+  /** True when col F notes contain "WIP" (re-evaluated every refresh). */
+  wip: boolean;
+  /** Badger name (table-of-contents col B). */
   name: string;
-  /** Raw col-C cell text — a docs URL when a sheet is linked, else a note. */
+  /** The badger's own Roblox game placeId, read from the sheet (the badger tab's
+   *  topmost `roblox.com/games/{id}` link). Lets us link the row + detect an
+   *  owner-ban without any Roblox request. */
+  placeId?: number;
+  /** The badger's tab name (the internal hyperlink target). */
   docRaw: string;
-  /** The linked doc's spreadsheet id, when col C is a Google Sheets URL. */
+  /** Always the hub spreadsheet id (every badger tab lives in the one doc). */
   docSheetId: string | null;
-  /** Optional gid from the doc URL. */
+  /** The badger's tab name, used as the per-game cache/progress key. */
   docGid: string | null;
-  /** Full doc URL when present (for the out-link). */
+  /** Out-link to the source spreadsheet. */
   docUrl: string | null;
 }
 
@@ -85,6 +77,19 @@ export interface BadgerBadge {
   badgeDescription?: string;
   /** Total Roblox owners/awards for recommendation sorting. */
   awardedCount?: number;
+  /**
+   * Snapshot of the original sheet-resolved fields, captured the first time a
+   * user link override re-resolves this badge, so clearing the override can
+   * revert it. Present only on user-overridden badges.
+   */
+  orig?: {
+    badge: string;
+    badgeId: number | null;
+    resolvedGameName?: string;
+    rootPlaceId?: number;
+    badgeDescription?: string;
+    awardedCount?: number;
+  };
 }
 
 interface HubSnapshot {
@@ -92,202 +97,20 @@ interface HubSnapshot {
   games: BadgerGame[];
 }
 
-interface FetchUrlResponse {
-  ok: boolean;
-  data?: string;
-  status?: number;
-  error?: string;
-}
-
-interface GvizTable {
-  cols: Array<{ id?: string; label?: string; type?: string }>;
-  rows: Array<{ c: Array<{ v: unknown; f?: string } | null> }>;
-}
-
-function gvizUrl(sheetId: string, gid?: string | null): string {
-  const base = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:json`;
-  return gid ? `${base}&gid=${gid}` : base;
-}
-
-async function fetchViaServiceWorker(url: string): Promise<string> {
+/**
+ * Asks the service worker to fetch + unzip + parse the whole Badger Hub
+ * workbook (binary XLSX; the only source that carries cell fill colors). The SW
+ * returns plain JSON — this content script owns all storage writes.
+ */
+async function fetchHubWorkbook(): Promise<ParsedBadgerHub> {
   const resp = (await chrome.runtime.sendMessage({
-    type: 'fetchUrl',
-    url,
-    responseType: 'text',
-  })) as FetchUrlResponse | undefined;
-  if (!resp?.ok || typeof resp.data !== 'string') {
-    throw new Error(resp?.error || `Badger Hub fetch failed (${url})`);
+    type: 'bp-badgerhub-xlsx',
+    sheetId: HUB_SHEET_ID,
+  })) as { ok?: boolean; games?: BadgerGame[]; gamebadges?: Record<string, BadgerBadge[]>; error?: string } | undefined;
+  if (!resp?.ok || !Array.isArray(resp.games)) {
+    throw new Error(resp?.error || 'Could not load the Badger Hub workbook.');
   }
-  return resp.data;
-}
-
-/**
- * gviz responses are JSONP-ish: `…setResponse({...});`. Slice out the JSON
- * object and parse the `table`. Returns null on any shape surprise so the
- * caller can degrade gracefully.
- */
-function parseGviz(text: string): GvizTable | null {
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    const obj = JSON.parse(text.slice(start, end + 1)) as { table?: GvizTable };
-    return obj.table && Array.isArray(obj.table.rows) ? obj.table : null;
-  } catch {
-    return null;
-  }
-}
-
-function cellText(cell: { v: unknown; f?: string } | null | undefined): string {
-  if (!cell) return '';
-  if (typeof cell.f === 'string' && cell.f) return cell.f.trim();
-  if (cell.v == null) return '';
-  return String(cell.v).trim();
-}
-
-const SHEET_ID_RE = /\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/;
-const GID_RE = /[?#&]gid=(\d+)/;
-
-function parseDocCell(raw: string): { sheetId: string | null; gid: string | null; url: string | null } {
-  const idMatch = raw.match(SHEET_ID_RE);
-  if (!idMatch) return { sheetId: null, gid: null, url: null };
-  const gidMatch = raw.match(GID_RE);
-  return { sheetId: idMatch[1], gid: gidMatch ? gidMatch[1] : null, url: raw };
-}
-
-function parseHub(table: GvizTable): BadgerGame[] {
-  const out: BadgerGame[] = [];
-  let order = 0;
-  // The hub is fetched with `headers=0`, so row index maps 1:1 to the sheet's
-  // real row numbers (index 0 = sheet row 1) — that's what lets us match the
-  // curator's LEGACY_ROW_RANGES exactly, blank rows included.
-  table.rows.forEach((row, idx) => {
-    const sheetRow = idx + 1;
-    const c = row.c ?? [];
-    const name = cellText(c[1]); // col B = game name
-    if (!name || name.toUpperCase() === 'GAME') return; // skip header / blanks
-    const docRaw = cellText(c[2]); // col C = doc link / note
-    const { sheetId, gid, url } = parseDocCell(docRaw);
-    out.push({
-      order: ++order,
-      sheetRow,
-      legacy: isLegacyRow(sheetRow),
-      name,
-      docRaw,
-      docSheetId: sheetId,
-      docGid: gid,
-      docUrl: url,
-    });
-  });
-  return out;
-}
-
-function parseGameBadges(table: GvizTable): BadgerBadge[] {
-  const out: BadgerBadge[] = [];
-  let order = 0;
-  for (const row of table.rows) {
-    const c = row.c ?? [];
-    // Common per-game layout: col B = game/place, col C = badge name.
-    const game = cellText(c[1]);
-    const badge = cellText(c[2]);
-    if (!game && !badge) continue;
-    // Skip obvious header/separator rows.
-    if (/^badge$/i.test(badge) && /^game$/i.test(game)) continue;
-    out.push({ order: ++order, game, badge, badgeId: null });
-  }
-  return out;
-}
-
-/** Normalizes a badge name / URL slug to alphanumerics for fuzzy matching. */
-function slugKey(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
-}
-
-/**
- * Pulls ordered badge links (`roblox.com/badges/{id}/{slug}`) out of a
- * sub-sheet's edit HTML. The badge-name cells are hyperlinked in the source but
- * gviz strips the URL, so we recover ids here and match them to the gviz rows
- * by name-slug. Returns `[{badgeId, slug}]` in source order.
- */
-function extractBadgeLinks(editHtml: string): Array<{ badgeId: number; slug: string }> {
-  const re = /roblox\.com\/badges\/(\d+)(?:\/([^"'\\<>\s)]*))?/g;
-  const out: Array<{ badgeId: number; slug: string }> = [];
-  const seen = new Set<number>();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(editHtml))) {
-    const id = Number(m[1]);
-    if (seen.has(id)) continue; // a badge can be referenced more than once
-    seen.add(id);
-    out.push({ badgeId: id, slug: m[2] ?? '' });
-  }
-  return out;
-}
-
-/**
- * Attaches `badgeId` to each badge using the links recovered from the edit HTML.
- *
- * Both `badges` (gviz rows) and `links` (first-occurrence of each id in the edit
- * HTML) are in sheet-row order, which is what makes the positional step safe.
- * Two passes:
- *  1. **Slug anchors** — match each badge's name-slug to a link slug (the prior
- *     behavior; preserves recovery for normally-named badges).
- *  2. **Sandwich gap-fill** — between two consecutive slug anchors (and at the
- *     head/tail), assign the leftover links to the still-unmatched rows *in
- *     order*, but ONLY when the gap holds exactly as many unused links as
- *     unmatched rows. This recovers rows whose names slug to nothing (non-Latin
- *     / emoji / fancy-unicode), are empty, or are generic duplicates — without
- *     ever off-by-one'ing into the wrong badge (count mismatch ⇒ leave unlinked).
- */
-function attachBadgeIds(badges: BadgerBadge[], links: Array<{ badgeId: number; slug: string }>): void {
-  const used = new Array(links.length).fill(false);
-  const linkKeys = links.map((l) => slugKey(l.slug));
-
-  // Pass 1: slug match (unchanged) — these become the anchors.
-  const matchedLink = new Map<number, number>(); // badgeIndex -> linkIndex
-  badges.forEach((b, bi) => {
-    const key = slugKey(b.badge);
-    if (!key) return;
-    const li = linkKeys.findIndex((k, i) => !used[i] && k === key);
-    if (li >= 0) {
-      used[li] = true;
-      b.badgeId = links[li].badgeId;
-      matchedLink.set(bi, li);
-    }
-  });
-
-  // Pass 2: keep only anchors whose link index increases with badge index, so
-  // every gap between consecutive anchors is a clean, monotonic window.
-  const anchors: Array<{ bi: number; li: number }> = [];
-  let lastLi = -1;
-  for (const bi of [...matchedLink.keys()].sort((a, b) => a - b)) {
-    const li = matchedLink.get(bi)!;
-    if (li > lastLi) {
-      anchors.push({ bi, li });
-      lastLi = li;
-    }
-  }
-
-  // Pass 3: sandwich gap-fill between consecutive anchors, with virtual anchors
-  // at both ends, guarded by exact count equality.
-  const bounds = [{ bi: -1, li: -1 }, ...anchors, { bi: badges.length, li: links.length }];
-  for (let k = 0; k < bounds.length - 1; k++) {
-    const L = bounds[k];
-    const R = bounds[k + 1];
-    const gapBadges: number[] = [];
-    for (let bi = L.bi + 1; bi < R.bi; bi++) {
-      if (!badges[bi].badgeId) gapBadges.push(bi);
-    }
-    if (!gapBadges.length) continue;
-    const gapLinks: number[] = [];
-    for (let li = L.li + 1; li < R.li; li++) {
-      if (!used[li]) gapLinks.push(li);
-    }
-    if (gapBadges.length !== gapLinks.length) continue; // ambiguous → leave unlinked
-    for (let n = 0; n < gapBadges.length; n++) {
-      badges[gapBadges[n]].badgeId = links[gapLinks[n]].badgeId;
-      used[gapLinks[n]] = true;
-    }
-  }
+  return { games: resp.games, gamebadges: resp.gamebadges ?? {} };
 }
 
 // ── Hub list (SWR cached) ──────────────────────────────────────────────────
@@ -299,22 +122,206 @@ async function readHubSnapshot(): Promise<HubSnapshot | null> {
   return v;
 }
 
+/** Public URL of the source spreadsheet (its table-of-contents tab). */
+export const BADGER_HUB_SOURCE_URL =
+  `https://docs.google.com/spreadsheets/d/${HUB_SHEET_ID}/edit?gid=${HUB_GID}`;
+
+/**
+ * Copies Roblox-resolved enrichment from a previously-cached badge list onto a
+ * freshly-parsed one (same sheet → same `badgeId`/`order`), so a Refresh keeps
+ * the resolved game links/descriptions instead of discarding them and forcing a
+ * re-fetch on the next open. Sheet-derived fields (game/badge/badgeId) always
+ * take the fresh value; only the fetched fields are carried over.
+ */
+function mergeBadgeEnrichment(fresh: BadgerBadge[], prev: BadgerBadge[] | undefined): BadgerBadge[] {
+  if (!prev?.length) return fresh;
+  const byId = new Map<number, BadgerBadge>();
+  const byOrder = new Map<number, BadgerBadge>();
+  for (const p of prev) {
+    if (typeof p.badgeId === 'number') byId.set(p.badgeId, p);
+    byOrder.set(p.order, p);
+  }
+  for (const f of fresh) {
+    const old = (typeof f.badgeId === 'number' ? byId.get(f.badgeId) : undefined) ?? byOrder.get(f.order);
+    if (!old) continue;
+    if (old.rootPlaceId != null && f.rootPlaceId == null) f.rootPlaceId = old.rootPlaceId;
+    if (old.resolvedGameName && !f.resolvedGameName) f.resolvedGameName = old.resolvedGameName;
+    if (old.badgeDescription && !f.badgeDescription) f.badgeDescription = old.badgeDescription;
+    if (typeof old.awardedCount === 'number' && f.awardedCount == null) f.awardedCount = old.awardedCount;
+    if (old.orig && !f.orig) f.orig = old.orig;
+  }
+  return fresh;
+}
+
+// ── User data sheet (badgeId → resolved game link / description) ─────────────
+// A user-maintained public Google Sheet (keyless CSV) mirroring the hub's badges
+// with their resolved game link + description already filled in, so the hub renders
+// links/descriptions WITHOUT a getBadgeDetail call. The curator workbook stays the
+// structure-of-record (which badgers/badges exist); this sheet is just a shared,
+// persistent resolution cache keyed by badgeId. Hardcoded for now (single user).
+const DATA_SHEET_ID = '1OeZfo6FiD924FZ2TbtTzZNGQ4q4pIZVqALhFRmlwcJo';
+const DATA_SHEET_URL = `https://docs.google.com/spreadsheets/d/${DATA_SHEET_ID}/export?format=csv`;
+const DATA_SHEET_KEY = 'bloxplus.badgerhub.datasheet';
+const DATA_SHEET_FRESH_MS = 6 * 60 * 60_000;
+
+/** Result of reconciling the curator workbook against the user data sheet. */
+export interface DataSheetReconcile {
+  sheetRows: number; // distinct badges in the data sheet
+  filled: number;    // hub badge rows that got a link/description from the sheet this pass
+  newBadges: number; // distinct hub badgeIds not in the sheet yet (need resolving + adding)
+  removed: number;   // distinct sheet badgeIds no longer in the hub
+}
+
+interface DataSheetRow {
+  gameName?: string;
+  placeId?: number;
+  description?: string;
+}
+
+let dataSheetMem: Map<number, DataSheetRow> | null = null;
+let dataSheetFetchedAt = 0;
+let lastReconcile: DataSheetReconcile | null = null;
+
+/** The latest workbook↔data-sheet reconcile (set by fetchAndStoreHub). */
+export function getLastDataSheetReconcile(): DataSheetReconcile | null {
+  return lastReconcile;
+}
+
+/** Quote-aware CSV → rows of cells (handles quoted commas/newlines/`""` escapes). */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let field = '';
+  let row: string[] = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (c !== '\r') field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function parseDataSheet(csv: string): Map<number, DataSheetRow> {
+  const out = new Map<number, DataSheetRow>();
+  const rows = parseCsv(csv);
+  if (rows.length < 2) return out;
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const cBadge = header.indexOf('badgeid');
+  const cGame = header.indexOf('gamename');
+  const cPlace = header.indexOf('placeid');
+  const cDesc = header.indexOf('description');
+  if (cBadge < 0) return out;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const idRaw = (r[cBadge] ?? '').trim();
+    if (!/^\d+$/.test(idRaw)) continue; // skip blank/corrupted (e.g. scientific-notation) ids
+    const placeRaw = cPlace >= 0 ? (r[cPlace] ?? '').trim() : '';
+    out.set(Number(idRaw), {
+      gameName: (cGame >= 0 ? (r[cGame] ?? '').trim() : '') || undefined,
+      placeId: /^\d+$/.test(placeRaw) ? Number(placeRaw) : undefined,
+      description: (cDesc >= 0 ? (r[cDesc] ?? '').trim() : '') || undefined,
+    });
+  }
+  return out;
+}
+
+/** Loads the user data sheet (SWR: in-memory → storage → fresh via SW proxy). */
+async function getDataSheet(opts: { forceRefresh?: boolean } = {}): Promise<Map<number, DataSheetRow>> {
+  if (!opts.forceRefresh && dataSheetMem && Date.now() - dataSheetFetchedAt < DATA_SHEET_FRESH_MS) {
+    return dataSheetMem;
+  }
+  if (!opts.forceRefresh && !dataSheetMem) {
+    try {
+      const r = await chrome.storage.local.get(DATA_SHEET_KEY);
+      const v = r[DATA_SHEET_KEY] as { fetchedAt: number; rows: [number, DataSheetRow][] } | undefined;
+      if (v && Array.isArray(v.rows)) {
+        dataSheetMem = new Map(v.rows);
+        dataSheetFetchedAt = v.fetchedAt;
+        if (Date.now() - v.fetchedAt < DATA_SHEET_FRESH_MS) return dataSheetMem;
+      }
+    } catch { /* ignore — fetch fresh */ }
+  }
+  const resp = (await chrome.runtime.sendMessage({
+    type: 'fetchUrl',
+    url: DATA_SHEET_URL,
+    responseType: 'text',
+  })) as { ok?: boolean; data?: string; error?: string } | undefined;
+  if (!resp?.ok || typeof resp.data !== 'string') {
+    if (dataSheetMem) return dataSheetMem; // serve stale on a fetch failure
+    throw new Error(resp?.error || 'Could not load the Badger Hub data sheet.');
+  }
+  const map = parseDataSheet(resp.data);
+  dataSheetMem = map;
+  dataSheetFetchedAt = Date.now();
+  await chrome.storage.local
+    .set({ [DATA_SHEET_KEY]: { fetchedAt: dataSheetFetchedAt, rows: [...map] } })
+    .catch(() => {});
+  return map;
+}
+
+/**
+ * Overlays the data sheet's resolved fields onto the cached badge lists
+ * (fill-if-missing, so locally-resolved values aren't clobbered — mutates the live
+ * `gameCache` arrays so a later persist saves them) and returns a reconcile report.
+ */
+function overlayDataSheet(sheet: Map<number, DataSheetRow>): DataSheetReconcile {
+  const hubIds = new Set<number>();
+  const newIds = new Set<number>();
+  let filled = 0;
+  for (const list of gameCache.values()) {
+    for (const b of list) {
+      if (typeof b.badgeId !== 'number') continue;
+      hubIds.add(b.badgeId);
+      const row = sheet.get(b.badgeId);
+      if (!row) { newIds.add(b.badgeId); continue; }
+      let did = false;
+      if (row.placeId != null && b.rootPlaceId == null) { b.rootPlaceId = row.placeId; did = true; }
+      if (row.gameName && !b.resolvedGameName) { b.resolvedGameName = row.gameName; did = true; }
+      if (row.description && !b.badgeDescription) { b.badgeDescription = row.description; did = true; }
+      if (did) filled += 1;
+    }
+  }
+  let removed = 0;
+  for (const id of sheet.keys()) if (!hubIds.has(id)) removed += 1;
+  return { sheetRows: sheet.size, filled, newBadges: newIds.size, removed };
+}
+
 let hubInflight: Promise<BadgerGame[]> | null = null;
 
-async function fetchAndStoreHub(): Promise<BadgerGame[]> {
+async function fetchAndStoreHub(opts: { refreshDataSheet?: boolean } = {}): Promise<BadgerGame[]> {
   if (hubInflight) return hubInflight;
   hubInflight = (async () => {
-    // `headers=0` + an explicit range so gviz returns EVERY row (header + the
-    // blank rows 2-3 included), making row index == sheet row for legacy
-    // matching. The range is generous; gviz trims to the real data extent.
-    const text = await fetchViaServiceWorker(
-      `${gvizUrl(HUB_SHEET_ID, HUB_GID)}&headers=0&range=A1:F1000`
-    );
-    const table = parseGviz(text);
-    if (!table) throw new Error('Could not parse the Badger Hub sheet.');
-    const games = parseHub(table);
+    // One workbook parse yields the hub list AND every badger tab's badge list.
+    const { games, gamebadges } = await fetchHubWorkbook();
+    if (!games.length) throw new Error('The Badger Hub workbook returned no badgers.');
     const snapshot: HubSnapshot = { fetchedAt: Date.now(), games };
     await chrome.storage.local.set({ [STORAGE_KEY]: snapshot });
+    // Prime + persist the per-badger badge lists so dropdowns open instantly
+    // and search/recommendations have data without any further fetch.
+    await ensureStoredHydrated();
+    // Carry over Roblox-resolved enrichment (rootPlaceId, game name, description,
+    // awarded count) from the previous cache onto the fresh sheet rows — otherwise
+    // every Refresh wipes it and the next dropdown open re-fetches everything.
+    for (const [key, list] of Object.entries(gamebadges)) {
+      gameCache.set(key, mergeBadgeEnrichment(list, gameCache.get(key)));
+    }
+    // Overlay the user data sheet so badges render with game links + descriptions
+    // WITHOUT a getBadgeDetail call, and report what changed vs the live workbook.
+    try {
+      lastReconcile = overlayDataSheet(await getDataSheet({ forceRefresh: opts.refreshDataSheet }));
+    } catch (e) {
+      lastReconcile = null;
+      console.warn('[SviBlox] Badger Hub data sheet overlay failed', e);
+    }
+    await persistGameBadges();
     return games;
   })();
   try {
@@ -345,7 +352,9 @@ export async function loadBadgerHub(opts: { refresh?: boolean } = {}): Promise<{
 }
 
 export async function refreshBadgerHub(): Promise<BadgerGame[]> {
-  return fetchAndStoreHub();
+  // Manual refresh re-pulls the user data sheet too, so the user's latest edits
+  // (newly added/fixed links) take effect immediately.
+  return fetchAndStoreHub({ refreshDataSheet: true });
 }
 
 // ── Per-game owned progress (n / total), persisted across sessions ──────────
@@ -360,17 +369,26 @@ export async function getBadgerProgress(): Promise<Record<string, GameProgress>>
   if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
   const out: Record<string, GameProgress> = {};
   for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-    const p = val as { owned?: unknown; total?: unknown };
+    const p = val as { owned?: unknown; total?: unknown; checkableTotal?: unknown };
     if (typeof p?.owned === 'number' && typeof p?.total === 'number') {
-      out[k] = { owned: p.owned, total: p.total };
+      out[k] = {
+        owned: p.owned,
+        total: p.total,
+        ...(typeof p.checkableTotal === 'number' ? { checkableTotal: p.checkableTotal } : {}),
+      };
     }
   }
   return out;
 }
 
-export async function setBadgerProgress(sheetId: string, owned: number, total: number): Promise<void> {
+export async function setBadgerProgress(
+  sheetId: string,
+  owned: number,
+  total: number,
+  checkableTotal?: number
+): Promise<void> {
   const all = await getBadgerProgress();
-  all[sheetId] = { owned, total };
+  all[sheetId] = { owned, total, checkableTotal };
   await chrome.storage.local.set({ [PROGRESS_KEY]: all });
 }
 
@@ -447,8 +465,10 @@ export async function getAllCachedBadgerGameBadges(): Promise<Record<string, Bad
 }
 
 /**
- * Loads a game's badge list from its linked sub-sheet. Served from memory (or
- * persisted cache) when available; otherwise fetched. Keyed by `sheetId:gid`.
+ * Loads a badger tab's badge list. Every badge list comes from the one workbook
+ * parse (keyed by `sheetId:tabName`), so this is normally an instant cache hit.
+ * On a cache miss (e.g. storage cleared mid-session) it re-runs the workbook
+ * load to repopulate, then returns from cache.
  */
 export async function loadBadgerGameBadges(
   sheetId: string,
@@ -461,27 +481,8 @@ export async function loadBadgerGameBadges(
   const inflight = gameInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
-    // gviz for the badge text (cheap), edit HTML for the badge hyperlinks
-    // (heavier, ~300 KB) — fetched in parallel. Edit fetch failure just means
-    // no badge links for this game, not a fatal error.
-    const editUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/edit${gid ? `?gid=${gid}` : ''}`;
-    const [text, editHtml] = await Promise.all([
-      fetchViaServiceWorker(gvizUrl(sheetId, gid)),
-      fetchViaServiceWorker(editUrl).catch(() => null),
-    ]);
-    const table = parseGviz(text);
-    if (!table) throw new Error('Could not parse this game sheet.');
-    const badges = parseGameBadges(table);
-    if (editHtml) {
-      try {
-        attachBadgeIds(badges, extractBadgeLinks(editHtml));
-      } catch {
-        /* leave badges unlinked on a parse surprise */
-      }
-    }
-    gameCache.set(key, badges);
-    void persistGameBadges();
-    return badges;
+    await fetchAndStoreHub().catch(() => {}); // repopulates the whole cache
+    return gameCache.get(key) ?? [];
   })();
   gameInflight.set(key, p);
   try {
@@ -489,4 +490,18 @@ export async function loadBadgerGameBadges(
   } finally {
     gameInflight.delete(key);
   }
+}
+
+/**
+ * Re-parses a badger tab straight from the source workbook, **bypassing the
+ * cache** (and not writing to it), so it reflects the current source. Used to
+ * recover a badge's original fields when a pre-snapshot link override left no
+ * `orig` to revert to.
+ */
+export async function fetchFreshBadgerGameBadges(
+  sheetId: string,
+  gid?: string | null
+): Promise<BadgerBadge[]> {
+  const { gamebadges } = await fetchHubWorkbook();
+  return gamebadges[gameBadgeCacheKey(sheetId, gid)] ?? [];
 }

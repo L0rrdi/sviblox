@@ -27,17 +27,22 @@ export function install(): void {
       if (!m) return;
       const id = Number(m[1]);
       if (!Number.isFinite(id)) return;
-      try {
-        sessionStorage.setItem(
-          SESSION_KEY,
-          JSON.stringify({ id, ts: Date.now() })
-        );
-      } catch {
-        /* private mode etc. */
-      }
+      writeRecentProfileNav(id);
     },
     true
   );
+}
+
+export function writeRecentProfileNav(id: number): void {
+  if (!Number.isFinite(id)) return;
+  try {
+    sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ id, ts: Date.now() })
+    );
+  } catch {
+    /* private mode etc. */
+  }
 }
 
 export function readRecentProfileNav(): number | null {
@@ -47,6 +52,23 @@ export function readRecentProfileNav(): number | null {
     const { id, ts } = JSON.parse(raw) as { id?: number; ts?: number };
     if (typeof id !== 'number' || typeof ts !== 'number') return null;
     if (Date.now() - ts > STALE_MS) return null;
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+export async function readRecentProfileNavForCurrentTab(): Promise<number | null> {
+  const local = readRecentProfileNav();
+  if (local) return local;
+
+  try {
+    const resp = (await chrome.runtime.sendMessage({
+      type: 'bp-read-recent-profile-nav',
+    })) as { ok?: boolean; id?: number } | undefined;
+    const id = resp?.ok && typeof resp.id === 'number' ? resp.id : null;
+    if (!id) return null;
+    writeRecentProfileNav(id);
     return id;
   } catch {
     return null;

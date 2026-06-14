@@ -36,7 +36,11 @@ import {
   AvatarItemsValue,
 } from '@/api/accountValue';
 
-import { install as installBannedTrap, readRecentProfileNav } from './bannedProfileTrap';
+import {
+  install as installBannedTrap,
+  readRecentProfileNav,
+  readRecentProfileNavForCurrentTab,
+} from './bannedProfileTrap';
 
 const STYLE_ID = 'bloxplus-banned-profile-style';
 const ROOT_ID = 'bloxplus-banned-profile';
@@ -61,7 +65,7 @@ export async function run(): Promise<void> {
   }
 
   if (location.pathname === '/request-error') {
-    const recovered = readRecentProfileNav();
+    const recovered = await readRecentProfileNavForCurrentTab();
     if (recovered) await maybeRender(recovered, location.pathname);
     return;
   }

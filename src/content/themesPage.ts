@@ -82,7 +82,7 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-tp-section {
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 20px;
       margin-bottom: 20px;
     }
@@ -104,7 +104,7 @@ function ensureStyle(): void {
       flex-direction: column;
       gap: 8px;
     }
-    #${PAGE_ID} .bp-preset.bp-active { border-color: #4a90e2; }
+    #${PAGE_ID} .bp-preset.bp-active { border-color: #335fff; }
     #${PAGE_ID} .bp-preset:hover { background: rgba(255,255,255,0.08); }
     #${PAGE_ID} .bp-preset-swatch {
       height: 48px; border-radius: 6px;
@@ -129,7 +129,7 @@ function ensureStyle(): void {
       text-align: center; min-height: 116px;
       color: rgba(255,255,255,0.75);
     }
-    #${PAGE_ID} .bp-preset-add:hover { border-color: #4a90e2; color: #fff; }
+    #${PAGE_ID} .bp-preset-add:hover { border-color: #335fff; color: #fff; }
     #${PAGE_ID} .bp-preset-add .bp-preset-add-icon {
       font-size: 26px; line-height: 1; font-weight: 300; margin-bottom: 4px;
     }
@@ -142,9 +142,9 @@ function ensureStyle(): void {
       padding: 2px 6px; font-size: 11px;
       background: rgba(0,0,0,0.55); color: #fff;
       border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 4px; cursor: pointer;
+      border-radius: 8px; cursor: pointer;
     }
-    #${PAGE_ID} .bp-preset-tools button:hover { background: rgba(74,144,226,0.8); }
+    #${PAGE_ID} .bp-preset-tools button:hover { background: rgba(51,95,255,0.85); }
     #${PAGE_ID} .bp-preset-tools button.bp-danger:hover { background: rgba(217,83,79,0.85); }
 
     #${PAGE_ID} .bp-color-grid {
@@ -156,12 +156,12 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-color-row label { flex: 1; font-size: 13px; }
     #${PAGE_ID} .bp-color-row input[type="color"] {
       width: 44px; height: 32px; border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 4px; padding: 0; background: transparent; cursor: pointer;
+      border-radius: 8px; padding: 0; background: transparent; cursor: pointer;
     }
     #${PAGE_ID} .bp-color-row input[type="text"] {
       width: 100px; padding: 4px 6px; font-family: monospace; font-size: 12px;
       background: #1a1d24; color: inherit;
-      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
     }
 
     #${PAGE_ID} .bp-bg-controls { display: flex; flex-direction: column; gap: 12px; }
@@ -205,7 +205,7 @@ function ensureStyle(): void {
       padding: 7px 8px;
       background: #1a1d24; color: inherit;
       border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 4px;
+      border-radius: 8px;
       color-scheme: dark;
     }
     #${PAGE_ID} .bp-schedule-toggle {
@@ -224,15 +224,15 @@ function ensureStyle(): void {
       display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;
     }
     #${PAGE_ID} button.bp-btn {
-      padding: 8px 14px; font-size: 13px; font-weight: 500;
-      border-radius: 4px;
+      padding: 8px 14px; font-size: 13px; font-weight: 600;
+      border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.18);
       background: rgba(255,255,255,0.06);
       color: inherit; cursor: pointer;
     }
     #${PAGE_ID} button.bp-btn:hover { background: rgba(255,255,255,0.12); }
     #${PAGE_ID} button.bp-btn.bp-btn-primary {
-      background: #4a90e2; border-color: #4a90e2; color: #fff;
+      background: #335fff; border-color: #335fff; color: #fff;
     }
     #${PAGE_ID} button.bp-btn.bp-btn-danger {
       background: rgba(217, 83, 79, 0.2); border-color: #d9534f; color: #f8a8a5;
@@ -241,10 +241,10 @@ function ensureStyle(): void {
       padding: 4px 24px 4px 8px;
       background: #1a1d24; color: inherit;
       border: 1px solid rgba(255,255,255,0.18);
-      border-radius: 4px; cursor: pointer;
+      border-radius: 8px; cursor: pointer;
     }
     #${PAGE_ID} .bp-brightness-label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
-    #${PAGE_ID} .bp-brightness-label input[type="range"] { flex: 1; max-width: 320px; accent-color: #4a90e2; }
+    #${PAGE_ID} .bp-brightness-label input[type="range"] { flex: 1; max-width: 320px; accent-color: #335fff; }
     #${PAGE_ID} .bp-num-input {
       display: inline-flex; align-items: center; gap: 2px;
       font-size: 12px; opacity: 0.8; flex: 0 0 auto;
@@ -252,12 +252,12 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-num-input input[type="number"] {
       width: 50px; text-align: right; font-variant-numeric: tabular-nums;
       background: #1a1d24; color: #e6e6e6;
-      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
       padding: 3px 6px; font-size: 12px; outline: none;
     }
     #${PAGE_ID} .bp-num-input input[type="number"]:hover { border-color: rgba(255,255,255,0.32); }
     #${PAGE_ID} .bp-num-input input[type="number"]:focus {
-      border-color: rgba(74,144,226,0.9); box-shadow: 0 0 0 2px rgba(74,144,226,0.18);
+      border-color: rgba(51,95,255,0.9); box-shadow: 0 0 0 2px rgba(51,95,255,0.22);
     }
     #${PAGE_ID} .bp-status { font-size: 12px; opacity: 0.7; margin-top: 8px; min-height: 14px; }
 
@@ -289,7 +289,7 @@ function ensureStyle(): void {
       min-width: 320px; max-width: 480px;
       background: #1c1f26; color: #fff;
       border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 22px 24px;
       box-shadow: 0 24px 48px rgba(0,0,0,0.5);
       font-family: inherit;
@@ -299,23 +299,23 @@ function ensureStyle(): void {
     #${MODAL_ID} input[type="text"] {
       width: 100%; padding: 8px 10px; margin-bottom: 16px;
       background: #14171d; color: inherit;
-      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
       font: inherit; font-size: 14px;
     }
-    #${MODAL_ID} input[type="text"]:focus { outline: 2px solid #4a90e2; outline-offset: -1px; }
+    #${MODAL_ID} input[type="text"]:focus { outline: 2px solid #335fff; outline-offset: -1px; }
     #${MODAL_ID} .bp-modal-actions {
       display: flex; gap: 8px; justify-content: flex-end;
     }
     #${MODAL_ID} .bp-modal-actions button {
-      padding: 7px 14px; font-size: 13px; font-weight: 500;
-      border-radius: 4px;
+      padding: 7px 14px; font-size: 13px; font-weight: 600;
+      border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.18);
       background: rgba(255,255,255,0.06);
       color: inherit; cursor: pointer;
     }
     #${MODAL_ID} .bp-modal-actions button:hover { background: rgba(255,255,255,0.12); }
     #${MODAL_ID} .bp-modal-actions button.bp-primary {
-      background: #4a90e2; border-color: #4a90e2; color: #fff;
+      background: #335fff; border-color: #335fff; color: #fff;
     }
   `;
   document.head.appendChild(style);

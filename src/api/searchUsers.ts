@@ -1,4 +1,4 @@
-import { robloxFetch } from './robloxClient';
+import { robloxFetch, robloxPost } from './robloxClient';
 
 const CACHE_TTL_MS = 60_000;
 
@@ -55,5 +55,35 @@ export async function searchUsers(keyword: string, limit = 3): Promise<SearchUse
     return out;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Resolves an **exact** username to a user via `POST /v1/usernames/users` with
+ * `excludeBannedUsers: false`. Unlike `searchUsers` (which is fuzzy and silently
+ * drops banned accounts), this returns the precise account — including banned
+ * ones — so a banned friend can be looked up by their exact username. Returns
+ * null when the name isn't an exact username (e.g. a display name). POST is
+ * CORS-OK + credentialed from page context and needs no CSRF for this lookup.
+ */
+export async function lookupUsername(username: string): Promise<SearchUser | null> {
+  const trimmed = username.trim();
+  if (!trimmed) return null;
+  try {
+    const data = await robloxPost<UserSearchResponse>(
+      'https://users.roblox.com/v1/usernames/users',
+      { usernames: [trimmed], excludeBannedUsers: false },
+      { cacheKey: `usernameLookup:${trimmed.toLowerCase()}`, cacheTtlMs: CACHE_TTL_MS, retries: 1 }
+    );
+    const e = (data.data ?? [])[0];
+    if (!e || typeof e.id !== 'number' || !e.name) return null;
+    return {
+      id: e.id,
+      name: e.name,
+      displayName: e.displayName || e.name,
+      hasVerifiedBadge: e.hasVerifiedBadge,
+    };
+  } catch {
+    return null;
   }
 }

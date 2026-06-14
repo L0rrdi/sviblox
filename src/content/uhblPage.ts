@@ -994,7 +994,7 @@ function ensureStyle(): void {
       font-size: 12px; opacity: 0.85; margin-bottom: 20px;
     }
     #${PAGE_ID} .bp-uhbl-btn {
-      padding: 6px 12px; font-size: 12px; border-radius: 4px;
+      padding: 6px 12px; font-size: 12px; border-radius: 8px;
       border: 1px solid rgba(255,255,255,0.18);
       background: rgba(255,255,255,0.06); color: inherit;
       cursor: pointer; text-decoration: none;
@@ -1020,7 +1020,7 @@ function ensureStyle(): void {
       border: 1px solid rgba(255,255,255,0.10);
     }
     #${PAGE_ID} .bp-uhbl-segmented button {
-      min-width: 96px; padding: 5px 9px; border: 0; border-radius: 4px;
+      min-width: 96px; padding: 5px 9px; border: 0; border-radius: 6px;
       background: transparent; color: inherit; cursor: pointer;
       font-size: 12px; font-weight: 600;
     }
@@ -1032,7 +1032,7 @@ function ensureStyle(): void {
     #${PAGE_ID} .bp-uhbl-progress {
       margin: 4px 0 22px 0;
       padding: 14px 16px;
-      border-radius: 10px;
+      border-radius: 12px;
       background: linear-gradient(135deg, rgba(255,82,143,0.14), rgba(124,58,237,0.10));
       border: 1px solid rgba(255,82,143,0.32);
       display: flex; flex-direction: column; gap: 10px;
@@ -1073,7 +1073,7 @@ function ensureStyle(): void {
       padding: 14px; margin-bottom: 18px;
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 10px;
+      border-radius: 12px;
       position: sticky; top: 8px; z-index: 5;
       backdrop-filter: blur(8px);
     }
@@ -1096,7 +1096,7 @@ function ensureStyle(): void {
       width: 100%; max-width: 420px;
       padding: 8px 10px; font-size: 13px;
       background: #1a1d24; color: inherit;
-      border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
     }
     #${PAGE_ID} .bp-uhbl-pillsets {
       display: flex; gap: 16px; flex-wrap: wrap;
@@ -1120,7 +1120,7 @@ function ensureStyle(): void {
     }
     #${PAGE_ID} .bp-uhbl-pill:hover { background: rgba(255,255,255,0.12); }
     #${PAGE_ID} .bp-uhbl-pill.bp-uhbl-pill-active {
-      background: #4a90e2; border-color: #4a90e2; color: #fff;
+      background: #335fff; border-color: #335fff; color: #fff;
     }
     #${PAGE_ID} .bp-uhbl-status {
       font-size: 12px; opacity: 0.65; min-height: 14px;
@@ -1130,7 +1130,7 @@ function ensureStyle(): void {
     #${PAGE_ID} details.bp-uhbl-tier {
       background: rgba(255,255,255,0.04);
       border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 14px 16px;
     }
     #${PAGE_ID} details.bp-uhbl-tier > summary {

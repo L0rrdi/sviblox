@@ -2,6 +2,7 @@ import { getSettings } from '@/storage/settingsStore';
 import { accumulateTrackedSecondsForUser } from '@/storage/playtimeStore';
 import { recordLastSeen, LastSeenMap } from '@/storage/lastSeenStore';
 import { cachePruneExpired } from '@/storage/cacheStore';
+import { parseBadgerHubWorkbook } from '@/api/badgerHubXlsx';
 
 const ALARM_NAME = 'bloxplus.presenceCheck';
 const CACHE_PRUNE_ALARM = 'bloxplus.cachePrune';
@@ -9,6 +10,9 @@ const POLL_INTERVAL_MIN = 1; // chrome.alarms minimum
 const CACHE_PRUNE_INTERVAL_MIN = 60; // hourly
 const AUTH_USER_CACHE_MS = 15_000;
 const PRESENCE_BATCH_SIZE = 50;
+const PROFILE_NAV_STALE_MS = 30_000;
+
+const recentProfileNavByTab = new Map<number, { id: number; ts: number }>();
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[SviBlox] installed');
@@ -33,6 +37,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'pollNow') {
     void poll().then(() => sendResponse({ ok: true }));
     return true;
+  }
+  if (message?.type === 'bp-read-recent-profile-nav') {
+    const tabId = _sender.tab?.id;
+    const id = typeof tabId === 'number' ? readRecentProfileNav(tabId) : null;
+    sendResponse({ ok: true, id });
+    return false;
   }
   if (
     message?.type === 'bp-uhbl-scrape-update' &&
@@ -78,6 +88,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     void downloadCatalogSource(Number(message.assetId), assetName)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
+    return true;
+  }
+  if (message?.type === 'bp-badgerhub-xlsx' && typeof message.sheetId === 'string') {
+    let stage = 'fetch';
+    void (async () => {
+      try {
+        const url = `https://docs.google.com/spreadsheets/d/${message.sheetId}/export?format=xlsx`;
+        const r = await fetch(url, { credentials: 'omit' });
+        if (!r.ok) {
+          sendResponse({ ok: false, error: `HTTP ${r.status}` });
+          return;
+        }
+        stage = 'buffer';
+        const buf = await r.arrayBuffer();
+        stage = 'parse';
+        const parsed = await parseBadgerHubWorkbook(buf, message.sheetId as string);
+        sendResponse({ ok: true, games: parsed.games, gamebadges: parsed.gamebadges });
+      } catch (e) {
+        console.warn('[SviBlox] badgerhub xlsx failed at', stage, e);
+        sendResponse({ ok: false, error: `[${stage}] ${errorMessage(e)}` });
+      }
+    })();
     return true;
   }
   if (message?.type === 'fetchUrl' && typeof message.url === 'string') {
@@ -142,6 +174,26 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   return false;
+});
+
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  if (details.frameId !== 0 || details.tabId < 0) return;
+  const userId = profileUserIdFromUrl(details.url);
+  if (!userId) return;
+  recentProfileNavByTab.set(details.tabId, { id: userId, ts: Date.now() });
+});
+
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId !== 0 || details.tabId < 0) return;
+  const url = safeUrl(details.url);
+  if (!url || url.hostname !== 'www.roblox.com') return;
+  if (url.pathname === '/request-error') return;
+  if (profileUserIdFromUrl(url.toString())) return;
+  recentProfileNavByTab.delete(details.tabId);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  recentProfileNavByTab.delete(tabId);
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -678,6 +730,33 @@ function isAllowedFetchUrl(url: URL): boolean {
   if (url.hostname === 'docs.google.com' && url.pathname.startsWith('/spreadsheets/')) return true;
   if (url.hostname.endsWith('.googleusercontent.com')) return true;
   return false;
+}
+
+function readRecentProfileNav(tabId: number): number | null {
+  const entry = recentProfileNavByTab.get(tabId);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > PROFILE_NAV_STALE_MS) {
+    recentProfileNavByTab.delete(tabId);
+    return null;
+  }
+  return entry.id;
+}
+
+function profileUserIdFromUrl(raw: string): number | null {
+  const url = safeUrl(raw);
+  if (!url || url.hostname !== 'www.roblox.com') return null;
+  const match = url.pathname.match(/^\/users\/(\d+)\/profile\/?$/);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function safeUrl(raw: string): URL | null {
+  try {
+    return new URL(raw);
+  } catch {
+    return null;
+  }
 }
 
 async function postWithCsrf(url: string, body: string): Promise<Response | null> {

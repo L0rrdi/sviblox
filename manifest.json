@@ -4,7 +4,7 @@
   "version": "0.5.0",
   "version_name": "0.5.0 beta",
   "description": "BETA. Roblox home, friend stats, badges, store extras, subplaces, themes, currency, total spent, and playtime tracking.",
-  "permissions": ["storage", "alarms", "unlimitedStorage", "downloads"],
+  "permissions": ["storage", "alarms", "unlimitedStorage", "downloads", "webNavigation"],
   "host_permissions": [
     "https://www.roblox.com/*",
     "https://*.roblox.com/*",

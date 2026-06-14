@@ -182,7 +182,7 @@ export async function getOwnPurchaseValue(userId: number): Promise<OwnPurchaseVa
   return { totalRobuxSpent: totalRobux, purchaseCount: count };
 }
 
-async function canViewUserInventory(userId: number): Promise<boolean> {
+export async function canViewUserInventory(userId: number): Promise<boolean> {
   try {
     const data = await robloxFetch<CanViewInventoryResponse>(
       `https://inventory.roblox.com/v1/users/${userId}/can-view-inventory`,

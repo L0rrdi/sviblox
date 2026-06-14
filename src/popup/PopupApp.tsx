@@ -294,9 +294,10 @@ function openOptions(hash?: string): void {
   chrome.runtime.openOptionsPage();
 }
 
-function StatusStrip() {
+function PopupHeader() {
   const apiStatus = useApiStatus();
   const usage = useSyncUsage();
+  const version = chrome.runtime?.getManifest?.().version ?? '';
   const apiClass =
     apiStatus === 'online' ? 'sv-status-ok' :
     apiStatus === 'offline' ? 'sv-status-bad' : 'sv-status-neutral';
@@ -311,13 +312,29 @@ function StatusStrip() {
     ? `Settings item: ${(usage.itemBytes / 1024).toFixed(1)} / 8 KB (${usage.itemPct}%) · Total sync: ${(usage.totalBytes / 1024).toFixed(1)} / 100 KB (${usage.totalPct}%)`
     : 'Sync storage: checking…';
   return (
-    <div className="sv-status-strip">
-      <div className={`sv-status-pill ${apiClass}`} title={apiLabel}>
-        <span className="sv-status-dot" />
-        {apiStatus === 'offline' ? 'Offline' : apiStatus === 'online' ? 'Online' : '…'}
-      </div>
-      <div className={`sv-status-pill ${usageClass}`} title={usageLabel}>
-        Storage {usage ? `${usage.worstPct}%` : '…'}
+    <header className="sv-header">
+      <div className="sv-header-row">
+        <div className="sv-brand">
+          <img
+            className="sv-brand-logo"
+            src={chrome.runtime.getURL('public/icons/icon-48.png')}
+            alt=""
+          />
+          <div className="sv-brand-text">
+            <strong>SviBlox</strong>
+            <span>{version ? `v${version} · for Roblox` : 'for Roblox'}</span>
+          </div>
+        </div>
+        <div className="sv-header-pills">
+          <div className={`sv-status-pill ${apiClass}`} title={apiLabel}>
+            <span className="sv-status-dot" />
+            {apiStatus === 'offline' ? 'Offline' : apiStatus === 'online' ? 'Online' : 'Checking'}
+          </div>
+          <div className={`sv-status-pill ${usageClass}`} title={usageLabel}>
+            <span className="sv-status-dot" />
+            Storage {usage ? `${usage.worstPct}%` : '…'}
+          </div>
+        </div>
       </div>
       {usage && usage.worstPct >= 90 && (
         <div className="sv-status-warning" role="alert">
@@ -335,7 +352,7 @@ function StatusStrip() {
           </button>
         </div>
       )}
-    </div>
+    </header>
   );
 }
 
@@ -405,7 +422,7 @@ export function PopupApp() {
               setActiveInfo(activeInfo === feature.key ? null : feature.key)
             }
           >
-            !
+            i
           </button>
         </div>
         <button
@@ -466,10 +483,10 @@ export function PopupApp() {
   return (
     <div className="sv-popup">
       <style>{popupCss}</style>
-      <StatusStrip />
+      <PopupHeader />
       <section className="sv-panel">
         <div className="sv-title-row">
-          <h1>General Features</h1>
+          <h1>Features</h1>
           <button className="sv-options" type="button" onClick={() => openOptions()}>
             Advanced options
           </button>
@@ -1068,153 +1085,224 @@ const popupCss = `
     color-scheme: dark;
   }
   body {
-    background: #30363b;
+    margin: 0;
+    background: #111316;
   }
   .sv-popup {
+    --sv-bg: #111316;
+    --sv-surface: #1b1e24;
+    --sv-surface-2: #23272f;
+    --sv-border: rgba(255,255,255,0.08);
+    --sv-border-strong: rgba(255,255,255,0.15);
+    --sv-text: #f2f4f5;
+    --sv-muted: rgba(255,255,255,0.60);
+    --sv-faint: rgba(255,255,255,0.40);
+    --sv-accent: #335fff;
+    --sv-accent-hover: #4b74ff;
+    --sv-accent-soft: rgba(51,95,255,0.14);
+    --sv-ok: #3fc679;
+    --sv-warn: #ffc154;
+    --sv-danger: #f5635c;
     width: 520px;
     min-height: 480px;
     box-sizing: border-box;
     padding: 0;
-    background: #343a40;
-    color: #fff;
-    font-family: Arial, Helvetica, sans-serif;
-    font-size: 15px;
+    background: var(--sv-bg);
+    color: var(--sv-text);
+    font-family: "Builder Sans", "Source Sans Pro", "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
   }
   .sv-popup-loading {
     padding: 18px;
+    color: rgba(255,255,255,0.6);
   }
-  .sv-status-strip {
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  .sv-header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 20px;
+    background: rgba(17,19,22,0.97);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--sv-border);
+  }
+  .sv-header-row {
+    display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 38px;
-    background: rgba(0,0,0,0.18);
-    border-bottom: 1px solid rgba(0,0,0,0.25);
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .sv-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .sv-brand-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    flex: 0 0 auto;
+  }
+  .sv-brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    min-width: 0;
+  }
+  .sv-brand-text strong {
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+  }
+  .sv-brand-text span {
     font-size: 11px;
+    color: var(--sv-faint);
+    white-space: nowrap;
+  }
+  .sv-header-pills {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
   }
   .sv-status-pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 9px;
+    padding: 4px 10px;
     border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--sv-border);
+    background: var(--sv-surface);
+    font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.2px;
+    letter-spacing: 0.01em;
     white-space: nowrap;
+    color: var(--sv-muted);
   }
-  .sv-status-pill.sv-status-ok    { border-color: rgba(46,178,76,0.45); color: #aff0bf; }
-  .sv-status-pill.sv-status-warn  { border-color: rgba(245,190,65,0.45); color: #ffe08a; }
-  .sv-status-pill.sv-status-bad   { border-color: rgba(217,83,79,0.55); color: #ff9d99; }
-  .sv-status-pill.sv-status-neutral { color: rgba(255,255,255,0.7); }
+  .sv-status-pill.sv-status-ok   { color: #7fdba2; }
+  .sv-status-pill.sv-status-warn { color: #ffd383; }
+  .sv-status-pill.sv-status-bad  { color: #ff9d96; }
   .sv-status-dot {
-    width: 7px; height: 7px; border-radius: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
     background: currentColor;
+    flex: 0 0 auto;
   }
   .sv-status-warning {
-    flex-basis: 100%;
-    padding: 6px 10px;
-    border-radius: 6px;
-    background: rgba(217,83,79,0.16);
-    border: 1px solid rgba(217,83,79,0.4);
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: rgba(245,99,92,0.12);
+    border: 1px solid rgba(245,99,92,0.35);
     color: #ffd1ce;
-    font-size: 11px;
-    line-height: 1.4;
+    font-size: 12px;
+    line-height: 1.45;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
   .sv-status-warning-action {
     align-self: flex-start;
-    background: rgba(255,255,255,0.10);
-    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.16);
     color: #fff;
-    border-radius: 5px;
-    padding: 3px 10px;
+    border-radius: 6px;
+    padding: 4px 12px;
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
+    font-family: inherit;
   }
   .sv-status-warning-action:hover {
-    background: rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.14);
   }
+
+  /* ── Panels ─────────────────────────────────────────────────────────── */
   .sv-panel {
-    min-height: 100%;
     box-sizing: border-box;
-    padding: 30px 38px 28px;
-    border: 1px solid rgba(0,0,0,0.2);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    padding: 16px 20px 20px;
   }
   .sv-title-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 4px;
+    gap: 12px;
+    margin-bottom: 12px;
   }
   .sv-title-row h1 {
     margin: 0;
-    font-size: 18px;
+    font-size: 16px;
     font-weight: 700;
     line-height: 1.25;
-    border-bottom: 2px solid #fff;
-    padding-bottom: 3px;
-    letter-spacing: 0;
+    letter-spacing: 0.01em;
   }
   .sv-options {
-    border: 0;
-    border-radius: 4px;
-    background: #258edf;
-    color: #fff;
+    border: 1px solid var(--sv-border-strong);
+    border-radius: 8px;
+    background: var(--sv-surface-2);
+    color: var(--sv-text);
     cursor: pointer;
     font: inherit;
     font-size: 12px;
-    font-weight: 700;
-    padding: 7px 10px;
+    font-weight: 600;
+    padding: 6px 12px;
+    transition: background 0.12s ease, border-color 0.12s ease;
   }
   .sv-options:hover {
-    background: #35a1f2;
+    background: #2b313b;
+    border-color: rgba(255,255,255,0.24);
   }
+
+  /* ── Feature categories ─────────────────────────────────────────────── */
   .sv-category-list {
-    margin-top: 12px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
   .sv-category {
-    border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 6px;
-    background: rgba(0,0,0,0.12);
+    border: 1px solid var(--sv-border);
+    border-radius: 10px;
+    background: var(--sv-surface);
     overflow: hidden;
+    transition: border-color 0.12s ease;
   }
   .sv-category[open] {
-    background: rgba(0,0,0,0.18);
+    border-color: var(--sv-border-strong);
   }
   .sv-category-summary {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
+    gap: 10px;
+    padding: 11px 14px;
     cursor: pointer;
     list-style: none;
     user-select: none;
     font-size: 13px;
     font-weight: 700;
-    letter-spacing: 0.2px;
-    color: rgba(255,255,255,0.92);
+    letter-spacing: 0.01em;
+  }
+  .sv-category-summary:hover {
+    background: rgba(255,255,255,0.03);
   }
   .sv-category-summary::-webkit-details-marker { display: none; }
   .sv-category-summary::before {
-    content: '▸';
-    display: inline-block;
-    margin-right: 8px;
-    transition: transform 0.12s ease;
-    color: rgba(255,255,255,0.55);
-    font-size: 10px;
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-right: 2px solid var(--sv-faint);
+    border-bottom: 2px solid var(--sv-faint);
+    transform: rotate(-45deg);
+    transition: transform 0.15s ease;
+    flex: 0 0 auto;
   }
   .sv-category[open] > .sv-category-summary::before {
-    transform: rotate(90deg);
+    transform: rotate(45deg);
   }
   .sv-category-name {
     flex: 1;
@@ -1223,117 +1311,130 @@ const popupCss = `
   .sv-category-count {
     font-size: 11px;
     font-weight: 600;
-    color: rgba(255,255,255,0.55);
-    padding: 2px 7px;
+    color: var(--sv-muted);
+    padding: 2px 8px;
     border-radius: 999px;
     background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.08);
   }
   .sv-feature-list {
-    padding: 4px 12px 8px;
+    padding: 2px 14px 10px;
+    border-top: 1px solid var(--sv-border);
   }
   .sv-feature-block {
     margin: 0;
+  }
+  .sv-feature-block + .sv-feature-block {
+    border-top: 1px solid rgba(255,255,255,0.04);
   }
   .sv-feature-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 40px;
-    gap: 18px;
+    min-height: 42px;
+    gap: 16px;
   }
   .sv-feature-label {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     min-width: 0;
-    line-height: 1.25;
-    text-shadow: 0 1px 1px rgba(0,0,0,0.55);
+    line-height: 1.3;
+    font-size: 13px;
+    font-weight: 500;
   }
   .sv-info {
-    width: 15px;
-    height: 15px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
-    border: 2px solid rgba(255,255,255,0.85);
+    border: 1px solid var(--sv-border-strong);
     background: transparent;
-    color: #fff;
+    color: var(--sv-muted);
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 10px;
-    font-weight: 800;
-    line-height: 1;
+    font: italic 700 10px/1 Georgia, "Times New Roman", serif;
     padding: 0;
     flex: 0 0 auto;
+    transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
   }
   .sv-info:hover,
   .sv-info[aria-expanded="true"] {
-    border-color: #fff;
-    background: rgba(255,255,255,0.12);
+    border-color: var(--sv-accent);
+    color: #9db4ff;
+    background: var(--sv-accent-soft);
   }
   .sv-switch {
-    width: 50px;
-    height: 21px;
+    width: 40px;
+    height: 22px;
     border: 0;
     border-radius: 999px;
-    background: #58616a;
+    background: rgba(255,255,255,0.16);
     cursor: pointer;
     padding: 0;
     position: relative;
     flex: 0 0 auto;
-    transition: background 0.12s ease;
+    transition: background 0.15s ease;
+  }
+  .sv-switch:hover {
+    background: rgba(255,255,255,0.24);
   }
   .sv-switch span {
-    width: 21px;
-    height: 21px;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
-    background: #f5f5f5;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4);
     position: absolute;
-    top: 0;
-    left: 0;
-    transition: transform 0.12s ease;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.15s ease;
   }
   .sv-switch-on {
-    background: #1f9be6;
+    background: var(--sv-accent);
+  }
+  .sv-switch-on:hover {
+    background: var(--sv-accent-hover);
   }
   .sv-switch-on span {
-    transform: translateX(29px);
+    transform: translateX(18px);
   }
   .sv-feature-summary {
-    margin: -2px 62px 8px 0;
-    padding: 8px 10px;
-    border-left: 2px solid rgba(31,155,230,0.9);
-    background: rgba(0,0,0,0.18);
-    color: rgba(255,255,255,0.78);
+    margin: 0 0 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--sv-border);
+    border-left: 3px solid var(--sv-accent);
+    background: rgba(0,0,0,0.22);
+    color: var(--sv-muted);
     font-size: 12px;
-    line-height: 1.35;
+    line-height: 1.45;
   }
   .sv-feature-action {
     display: inline-block;
     margin-top: 8px;
-    padding: 5px 10px;
+    padding: 5px 12px;
     font-size: 11px;
     font-weight: 600;
-    border-radius: 4px;
-    border: 1px solid rgba(217, 83, 79, 0.5);
+    border-radius: 6px;
+    border: 1px solid rgba(245,99,92,0.45);
     background: transparent;
-    color: #ff8a85;
+    color: #ff9d96;
     cursor: pointer;
     font-family: inherit;
   }
   .sv-feature-action:hover {
-    background: rgba(217, 83, 79, 0.16);
+    background: rgba(245,99,92,0.14);
   }
   .sv-feature-controls {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin: 4px 62px 10px 0;
-    padding: 8px 10px;
-    border-left: 2px solid rgba(31,155,230,0.4);
-    background: rgba(0,0,0,0.12);
+    gap: 8px;
+    margin: 0 0 12px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--sv-border);
+    background: rgba(0,0,0,0.18);
   }
   .sv-control-row {
     display: flex;
@@ -1343,62 +1444,69 @@ const popupCss = `
     font-size: 12px;
   }
   .sv-control-label {
-    color: rgba(255,255,255,0.78);
+    color: var(--sv-muted);
   }
   .sv-select {
     appearance: none;
-    background: #2a2f33;
-    color: #fff;
-    border: 1px solid rgba(255,255,255,0.2);
-    border-radius: 4px;
+    background-color: var(--sv-surface-2);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%239ba1a8' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    color: var(--sv-text);
+    border: 1px solid var(--sv-border-strong);
+    border-radius: 8px;
     font: inherit;
     font-size: 12px;
-    padding: 4px 8px;
+    padding: 5px 26px 5px 10px;
     min-width: 170px;
     cursor: pointer;
     color-scheme: dark;
   }
   .sv-select option {
-    background: #1f252b;
+    background: #1b1e24;
     color: #fff;
   }
-  .sv-select:focus {
-    outline: 1px solid #1f9be6;
+  .sv-select:focus-visible {
+    outline: 2px solid rgba(51,95,255,0.55);
+    outline-offset: 1px;
   }
+
+  /* ── Hotkeys ────────────────────────────────────────────────────────── */
   .sv-panel-hotkeys {
-    border-top: 1px solid rgba(255,255,255,0.08);
-  }
-  .sv-panel-hotkeys .sv-title-row h1 {
-    border-bottom: 2px solid #fff;
+    border-top: 1px solid var(--sv-border);
   }
   .sv-hotkey-blurb {
-    margin: 8px 0 12px;
+    margin: 0 0 12px;
     font-size: 12px;
-    color: rgba(255,255,255,0.72);
+    color: var(--sv-muted);
+    line-height: 1.5;
   }
   .sv-hotkey-holdkey {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px 10px;
+    gap: 8px 12px;
     margin: 0 0 14px;
-    padding: 10px;
-    border-radius: 6px;
-    background: rgba(116, 64, 234, 0.10);
-    border: 1px solid rgba(116, 64, 234, 0.30);
+    padding: 11px 12px;
+    border-radius: 10px;
+    background: var(--sv-surface);
+    border: 1px solid var(--sv-border);
   }
   .sv-hotkey-holdkey-text {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
   }
-  .sv-hotkey-holdkey-text strong { font-size: 13px; }
+  .sv-hotkey-holdkey-text strong {
+    font-size: 13px;
+    font-weight: 700;
+  }
   .sv-hotkey-holdkey-text span {
     font-size: 11.5px;
-    line-height: 1.35;
-    color: rgba(255,255,255,0.68);
+    line-height: 1.4;
+    color: var(--sv-muted);
   }
   .sv-hotkey-holdkey-controls {
     flex: 0 0 auto;
@@ -1407,32 +1515,35 @@ const popupCss = `
     gap: 6px;
   }
   .sv-hotkey-holdkey .sv-hotkey-inline-conflict { flex-basis: 100%; }
-  .sv-hotkey-blurb kbd {
+  .sv-hotkey-blurb kbd,
+  .sv-hotkey-conflict kbd {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     min-width: 18px;
     height: 18px;
     padding: 0 5px;
-    border-radius: 3px;
-    background: rgba(255,255,255,0.14);
-    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 4px;
+    background: var(--sv-surface-2);
+    border: 1px solid var(--sv-border-strong);
+    border-bottom-width: 2px;
     font: 700 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
-    color: #c5b3ff;
+    color: var(--sv-text);
   }
   .sv-hotkey-empty {
-    padding: 10px 12px;
-    border-radius: 5px;
-    background: rgba(255,255,255,0.04);
-    color: rgba(255,255,255,0.55);
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--sv-surface);
+    border: 1px solid var(--sv-border);
+    color: var(--sv-muted);
     font-size: 12px;
     text-align: center;
   }
   .sv-hotkey-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 12px;
+    margin-bottom: 10px;
   }
   .sv-hotkey-group {
     display: flex;
@@ -1441,29 +1552,29 @@ const popupCss = `
   }
   .sv-hotkey-group-title {
     font-size: 11px;
-    font-weight: 800;
-    color: rgba(255,255,255,0.54);
+    font-weight: 700;
+    color: var(--sv-faint);
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.07em;
   }
   .sv-hotkey-conflict-summary {
-    padding: 7px 9px;
-    border-radius: 5px;
-    background: rgba(217, 83, 79, 0.12);
-    border: 1px solid rgba(217, 83, 79, 0.36);
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(245,99,92,0.10);
+    border: 1px solid rgba(245,99,92,0.32);
     color: #ffb1ad;
     font-size: 12px;
-    line-height: 1.35;
+    line-height: 1.4;
   }
   .sv-hotkey-row {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    padding: 6px 8px;
-    border-radius: 5px;
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: var(--sv-surface);
+    border: 1px solid var(--sv-border);
   }
   .sv-hotkey-label {
     flex: 1;
@@ -1476,68 +1587,73 @@ const popupCss = `
   .sv-hotkey-key {
     min-width: 32px;
     height: 28px;
-    padding: 0 8px;
-    border-radius: 4px;
-    background: rgba(116, 64, 234, 0.18);
-    color: #c5b3ff;
-    border: 1px solid rgba(116, 64, 234, 0.55);
+    padding: 0 9px;
+    border-radius: 6px;
+    background: var(--sv-surface-2);
+    color: var(--sv-text);
+    border: 1px solid var(--sv-border-strong);
+    border-bottom-width: 2px;
     font: 700 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
     text-transform: uppercase;
     cursor: pointer;
+    transition: border-color 0.12s ease, background 0.12s ease;
   }
   .sv-hotkey-key:hover {
-    background: rgba(116, 64, 234, 0.28);
+    background: #2b313b;
+    border-color: rgba(255,255,255,0.26);
   }
   .sv-hotkey-key-listening {
-    background: #4a90e2;
+    background: var(--sv-accent);
     color: #fff;
-    border-color: #4a90e2;
+    border-color: var(--sv-accent);
     text-transform: none;
     font-size: 11px;
     padding: 0 10px;
     animation: sv-hotkey-pulse 1s ease-in-out infinite;
   }
   @keyframes sv-hotkey-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(74, 144, 226, 0.5); }
-    50% { box-shadow: 0 0 0 4px rgba(74, 144, 226, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(51, 95, 255, 0.5); }
+    50% { box-shadow: 0 0 0 4px rgba(51, 95, 255, 0); }
   }
   .sv-hotkey-del {
     width: 24px;
     height: 24px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 6px;
     background: transparent;
-    color: rgba(255,255,255,0.55);
-    font: 700 16px/1 inherit;
+    color: var(--sv-faint);
+    font: 700 15px/1 inherit;
     cursor: pointer;
   }
   .sv-hotkey-del:hover {
-    background: rgba(217, 83, 79, 0.22);
-    color: #fbb;
+    background: rgba(245,99,92,0.18);
+    color: #ffb1ad;
   }
   .sv-hotkey-add-btn {
     width: 100%;
-    padding: 8px 10px;
+    padding: 9px 10px;
     border: 1px dashed rgba(255,255,255,0.22);
-    border-radius: 5px;
+    border-radius: 8px;
     background: transparent;
-    color: rgba(255,255,255,0.78);
+    color: var(--sv-muted);
     font: 600 12px/1.3 inherit;
     cursor: pointer;
+    transition: border-color 0.12s ease, color 0.12s ease;
   }
   .sv-hotkey-add-btn:hover {
-    background: rgba(255,255,255,0.04);
+    border-color: var(--sv-accent);
     color: #fff;
+    background: var(--sv-accent-soft);
   }
   .sv-hotkey-add-row {
     display: grid;
     grid-template-columns: 120px minmax(0, 1fr) minmax(0, 1fr) auto auto auto;
     align-items: center;
     gap: 6px;
-    padding: 8px;
-    border-radius: 5px;
-    background: rgba(74, 144, 226, 0.08);
-    border: 1px solid rgba(74, 144, 226, 0.32);
+    padding: 10px;
+    border-radius: 10px;
+    background: var(--sv-accent-soft);
+    border: 1px solid rgba(51, 95, 255, 0.36);
   }
   .sv-hotkey-add-mode,
   .sv-hotkey-add-folder,
@@ -1550,53 +1666,52 @@ const popupCss = `
     min-width: 0;
     width: 100%;
   }
+  .sv-hotkey-add-row .sv-select {
+    min-width: 0;
+  }
   .sv-hotkey-add-keyslot {
     display: flex;
   }
   .sv-hotkey-add-save,
   .sv-hotkey-add-cancel {
     height: 28px;
-    padding: 0 10px;
-    border-radius: 4px;
-    font: 700 12px/1 inherit;
+    padding: 0 12px;
+    border-radius: 8px;
+    font: 600 12px/1 inherit;
+    font-family: inherit;
     cursor: pointer;
     border: 0;
   }
   .sv-hotkey-add-save {
-    background: #1f9be6;
+    background: var(--sv-accent);
     color: #fff;
+  }
+  .sv-hotkey-add-save:hover:not(:disabled) {
+    background: var(--sv-accent-hover);
   }
   .sv-hotkey-add-save:disabled {
     background: rgba(255,255,255,0.10);
-    color: rgba(255,255,255,0.45);
+    color: rgba(255,255,255,0.40);
     cursor: not-allowed;
   }
   .sv-hotkey-add-cancel {
     background: rgba(255,255,255,0.08);
-    color: rgba(255,255,255,0.78);
+    color: var(--sv-muted);
+  }
+  .sv-hotkey-add-cancel:hover {
+    background: rgba(255,255,255,0.14);
+    color: #fff;
   }
   .sv-hotkey-conflict {
-    padding: 10px 12px;
-    border-radius: 5px;
-    background: rgba(217, 83, 79, 0.12);
-    border: 1px solid rgba(217, 83, 79, 0.40);
+    padding: 11px 12px;
+    border-radius: 10px;
+    background: rgba(245,99,92,0.10);
+    border: 1px solid rgba(245,99,92,0.36);
     font-size: 12px;
+    line-height: 1.45;
   }
   .sv-hotkey-conflict p {
-    margin: 0 0 8px;
-  }
-  .sv-hotkey-conflict kbd {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: 3px;
-    background: rgba(255,255,255,0.14);
-    border: 1px solid rgba(255,255,255,0.22);
-    font: 700 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
-    color: #fff;
+    margin: 0 0 9px;
   }
   .sv-hotkey-conflict-actions {
     display: flex;
@@ -1605,181 +1720,24 @@ const popupCss = `
   .sv-hotkey-conflict-actions button {
     flex: 1;
     height: 28px;
-    border-radius: 4px;
-    font: 700 12px/1 inherit;
+    border-radius: 8px;
+    font: 600 12px/1 inherit;
+    font-family: inherit;
     border: 0;
     cursor: pointer;
   }
   .sv-hotkey-conflict-actions button:first-child {
-    background: #d9534f;
+    background: var(--sv-danger);
     color: #fff;
   }
   .sv-hotkey-conflict-actions button:last-child {
     background: rgba(255,255,255,0.08);
-    color: rgba(255,255,255,0.78);
+    color: var(--sv-muted);
   }
   .sv-hotkey-inline-conflict {
     flex-basis: 100%;
     color: #ffb1ad;
     font-size: 11px;
-    line-height: 1.35;
-  }
-  .sv-panel-backup {
-    border-top: 1px solid rgba(255,255,255,0.08);
-  }
-  .sv-panel-playtime-manager {
-    border-top: 1px solid rgba(255,255,255,0.08);
-  }
-  .sv-playtime-summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    cursor: pointer;
-    list-style: none;
-    font-size: 14px;
-    font-weight: 800;
-  }
-  .sv-playtime-summary::-webkit-details-marker { display: none; }
-  .sv-playtime-summary::before {
-    content: '▸';
-    margin-right: 2px;
-    color: rgba(255,255,255,0.55);
-    font-size: 10px;
-    transition: transform 0.12s ease;
-  }
-  .sv-panel-playtime-manager[open] .sv-playtime-summary::before {
-    transform: rotate(90deg);
-  }
-  .sv-playtime-summary span:first-child {
-    flex: 1;
-    min-width: 0;
-  }
-  .sv-playtime-chip {
-    flex: 0 0 auto;
-    padding: 2px 7px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.07);
-    border: 1px solid rgba(255,255,255,0.10);
-    color: rgba(255,255,255,0.62);
-    font-size: 11px;
-    font-weight: 700;
-  }
-  .sv-playtime-manager-body {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .sv-playtime-grid,
-  .sv-playtime-add {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr);
-    gap: 8px;
-  }
-  .sv-playtime-add {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-    align-items: end;
-  }
-  .sv-playtime-field {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    font-size: 11px;
-    color: rgba(255,255,255,0.62);
-  }
-  .sv-playtime-field input,
-  .sv-playtime-field select {
-    height: 30px;
-    box-sizing: border-box;
-    border-radius: 4px;
-    border: 1px solid rgba(255,255,255,0.14);
-    background: rgba(0,0,0,0.18);
-    color: #fff;
-    padding: 0 8px;
-    font: 12px/1 inherit;
-    min-width: 0;
-    color-scheme: dark;
-  }
-  .sv-playtime-field select,
-  .sv-playtime-field select option {
-    background: #1f252b;
-    color: #fff;
-  }
-  .sv-playtime-actions,
-  .sv-playtime-warning {
-    display: flex;
-    gap: 8px;
-  }
-  .sv-playtime-actions button,
-  .sv-playtime-add button,
-  .sv-playtime-warning button {
-    height: 30px;
-    padding: 0 10px;
-    border-radius: 4px;
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.08);
-    color: #fff;
-    font: 700 12px/1 inherit;
-    cursor: pointer;
-  }
-  .sv-playtime-actions button:hover,
-  .sv-playtime-add button:hover,
-  .sv-playtime-warning button:hover {
-    background: rgba(255,255,255,0.14);
-  }
-  .sv-playtime-actions .sv-danger-btn {
-    border-color: rgba(217,83,79,0.45);
-    color: #ffb1ad;
-  }
-  .sv-playtime-warning {
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
-    border-radius: 5px;
-    border: 1px solid rgba(245,190,65,0.34);
-    background: rgba(245,190,65,0.10);
-    color: #ffe08a;
-    font-size: 12px;
-  }
-  .sv-backup-blurb {
-    margin: 8px 0 12px;
-    font-size: 12px;
-    color: rgba(255,255,255,0.72);
-  }
-  .sv-backup-row {
-    display: flex;
-    gap: 8px;
-  }
-  .sv-backup-btn {
-    flex: 1;
-    height: 32px;
-    padding: 0 12px;
-    border-radius: 4px;
-    border: 1px solid rgba(255,255,255,0.18);
-    background: rgba(255,255,255,0.06);
-    color: #fff;
-    font: 700 12px/1 inherit;
-    cursor: pointer;
-  }
-  .sv-backup-btn:hover {
-    background: rgba(255,255,255,0.12);
-    border-color: rgba(255,255,255,0.30);
-  }
-  .sv-backup-status {
-    margin-top: 10px;
-    padding: 8px 10px;
-    border-radius: 5px;
-    font-size: 12px;
-    line-height: 1.35;
-  }
-  .sv-backup-status-ok {
-    background: rgba(46,178,76,0.14);
-    border: 1px solid rgba(46,178,76,0.40);
-    color: #aff0bf;
-  }
-  .sv-backup-status-err {
-    background: rgba(217,83,79,0.14);
-    border: 1px solid rgba(217,83,79,0.40);
-    color: #ffd1ce;
+    line-height: 1.4;
   }
 `;
